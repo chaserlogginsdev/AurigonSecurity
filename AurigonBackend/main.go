@@ -259,7 +259,6 @@ func accountsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func createActionHandler(w http.ResponseWriter, r *http.Request) {
-	// Only admins can create actions
 	requestingUser := getUsernameFromToken(r)
 	var role string
 	db.QueryRow(`SELECT role FROM users WHERE username = ?`, requestingUser).Scan(&role)
@@ -275,17 +274,20 @@ func createActionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	validTypes := map[string]bool{
-		"disable_account": true,
-		"enable_account":  true,
-		"delete_account":  true,
-		"create_account":  true,
+		"disable_account":  true,
+		"enable_account":   true,
+		"delete_account":   true,
+		"create_account":   true,
+		"create_group":     true,
+		"delete_group":     true,
+		"add_to_group":     true,
+		"remove_from_group": true,
 	}
 	if !validTypes[req.Type] {
 		http.Error(w, "invalid action type", http.StatusBadRequest)
 		return
 	}
 
-	// Validate create_account params
 	if req.Type == "create_account" {
 		if req.Params == nil || req.Params["password"] == "" {
 			http.Error(w, "create_account requires a password param", http.StatusBadRequest)
@@ -293,6 +295,13 @@ func createActionHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(req.Params["password"]) < 8 {
 			http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if (req.Type == "add_to_group" || req.Type == "remove_from_group") {
+		if req.Params == nil || req.Params["group"] == "" {
+			http.Error(w, "group name required", http.StatusBadRequest)
 			return
 		}
 	}
@@ -392,6 +401,7 @@ func main() {
 	// Agent endpoints (no JWT)
 	http.HandleFunc("/register", corsMiddleware(agentAuthMiddleware(registerHandler)))
 	http.HandleFunc("/inventory", corsMiddleware(agentAuthMiddleware(inventoryHandler)))
+	http.HandleFunc("/groups/inventory", corsMiddleware(agentAuthMiddleware(groupInventoryHandler)))
 	http.HandleFunc("/actions", corsMiddleware(agentAuthMiddleware(agentActionsHandler)))
 	http.HandleFunc("/action-result", corsMiddleware(agentAuthMiddleware(actionResultHandler)))
 
@@ -402,6 +412,7 @@ func main() {
 	// Dashboard endpoints (JWT protected)
 	http.HandleFunc("/machines", corsMiddleware(authMiddleware(machinesHandler)))
 	http.HandleFunc("/accounts", corsMiddleware(authMiddleware(accountsHandler)))
+	http.HandleFunc("/groups", corsMiddleware(authMiddleware(groupsHandler)))
 	http.HandleFunc("/actions/create", corsMiddleware(authMiddleware(createActionHandler)))
 	http.HandleFunc("/actions/status", corsMiddleware(authMiddleware(actionsStatusHandler)))
 	http.HandleFunc("/audit", corsMiddleware(authMiddleware(auditLogHandler)))

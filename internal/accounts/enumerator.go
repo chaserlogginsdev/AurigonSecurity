@@ -17,8 +17,6 @@ func Disable(username string) {
 	log.Printf("Account %s disabled successfully\n", username)
 }
 
-// psUserScript wraps the result in an array explicitly so we always get
-// a JSON array even on PowerShell 5 (which lacks ConvertTo-Json -AsArray).
 const psUserScript = `
 $users = Get-LocalUser | Select-Object Name, Enabled, Description,
     @{Name='SID';Expression={$_.SID.Value}},
@@ -32,6 +30,27 @@ $members = Get-LocalGroupMember -Group Administrators |
     Select-Object @{Name='Name';Expression={($_.Name -split '\\')[-1]}}
 $arr = @($members)
 ConvertTo-Json $arr
+`
+
+const psGroupScript = `
+$groups = Get-LocalGroup | Select-Object Name, Description
+$result = @()
+foreach ($g in $groups) {
+    try {
+        $members = Get-LocalGroupMember -Group $g.Name |
+            Select-Object -ExpandProperty Name |
+            ForEach-Object { ($_ -split '\\')[-1] }
+        $arr = @($members)
+    } catch {
+        $arr = @()
+    }
+    $result += [PSCustomObject]@{
+        Name        = $g.Name
+        Description = if($g.Description){$g.Description}else{''}
+        Members     = $arr
+    }
+}
+$result | ConvertTo-Json -Depth 3
 `
 
 func Enumerate() ([]LocalAccount, error) {
@@ -76,6 +95,48 @@ func Enumerate() ([]LocalAccount, error) {
 			Description: u.Description,
 			LastLogon:   u.LastLogon,
 			IsAdmin:     adminMap[u.Name],
+		})
+	}
+	return result, nil
+}
+
+func EnumerateGroups() ([]LocalGroup, error) {
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", psGroupScript)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	// Handle single group (object) vs multiple groups (array)
+	raw := strings.TrimSpace(string(out))
+	if len(raw) == 0 {
+		return []LocalGroup{}, nil
+	}
+
+	// If single object returned, wrap in array
+	if raw[0] == '{' {
+		raw = "[" + raw + "]"
+	}
+
+	var groups []struct {
+		Name        string   `json:"Name"`
+		Description string   `json:"Description"`
+		Members     []string `json:"Members"`
+	}
+	if err := json.Unmarshal([]byte(raw), &groups); err != nil {
+		return nil, err
+	}
+
+	result := make([]LocalGroup, 0, len(groups))
+	for _, g := range groups {
+		members := g.Members
+		if members == nil {
+			members = []string{}
+		}
+		result = append(result, LocalGroup{
+			Name:        g.Name,
+			Description: g.Description,
+			Members:     members,
 		})
 	}
 	return result, nil

@@ -47,6 +47,23 @@ func initDB() {
 		UNIQUE(machine_id, username)
 	);
 
+	CREATE TABLE IF NOT EXISTS groups (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		machine_id  TEXT NOT NULL,
+		name        TEXT NOT NULL,
+		description TEXT,
+		FOREIGN KEY (machine_id) REFERENCES machines(id)
+	);
+
+	CREATE TABLE IF NOT EXISTS group_members (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		machine_id  TEXT NOT NULL,
+		group_id    INTEGER NOT NULL,
+		username    TEXT NOT NULL,
+		FOREIGN KEY (machine_id) REFERENCES machines(id),
+		FOREIGN KEY (group_id) REFERENCES groups(id)
+	);
+
 	CREATE TABLE IF NOT EXISTS users (
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
 		username   TEXT NOT NULL UNIQUE,

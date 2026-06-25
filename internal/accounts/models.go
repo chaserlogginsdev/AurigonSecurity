@@ -8,3 +8,9 @@ type LocalAccount struct {
 	LastLogon   string `json:"last_logon"`
 	IsAdmin     bool   `json:"is_admin"`
 }
+
+type LocalGroup struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Members     []string `json:"members"`
+}

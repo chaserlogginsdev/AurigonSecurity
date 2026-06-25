@@ -28,6 +28,11 @@ type ActionResultRequest struct {
 	Result   string `json:"result"`
 }
 
+type GroupInventoryRequest struct {
+	DeviceID string               `json:"device_id"`
+	Groups   []accounts.LocalGroup `json:"groups"`
+}
+
 func getBackendURL() string {
 	url := os.Getenv("AURIGON_BACKEND_URL")
 	if url == "" {
@@ -72,6 +77,18 @@ func uploadInventory(c *client.Client, deviceID string, accs interface{}) error 
 	}
 	if statusCode != http.StatusOK {
 		return fmt.Errorf("inventory upload failed with status %d", statusCode)
+	}
+	return nil
+}
+
+func uploadGroups(c *client.Client, deviceID string, groups []accounts.LocalGroup) error {
+	req := GroupInventoryRequest{DeviceID: deviceID, Groups: groups}
+	_, statusCode, err := c.Post("/groups/inventory", req)
+	if err != nil {
+		return err
+	}
+	if statusCode != http.StatusOK {
+		return fmt.Errorf("group inventory upload failed with status %d", statusCode)
 	}
 	return nil
 }
@@ -130,25 +147,47 @@ func executeAction(c *client.Client, action ActionRow) {
 	case "create_account":
 		password := action.Params["password"]
 		isAdmin := action.Params["is_admin"]
-
 		if password == "" {
-			reportResult(c, action.ID, "failed", "no password provided for create_account")
+			reportResult(c, action.ID, "failed", "no password provided")
 			return
 		}
-
-		// Create the account
 		output, err = runCommand("net", "user", action.Username, password, "/add")
 		if err != nil {
 			break
 		}
-
-		// Add to Administrators group if requested
 		if isAdmin == "true" {
 			adminOut, adminErr := runCommand("net", "localgroup", "Administrators", action.Username, "/add")
 			if adminErr != nil {
 				output += " | admin group error: " + adminOut
 			}
 		}
+
+	case "create_group":
+		desc := action.Params["description"]
+		if desc != "" {
+			output, err = runCommand("net", "localgroup", action.Username, "/add", "/comment:"+desc)
+		} else {
+			output, err = runCommand("net", "localgroup", action.Username, "/add")
+		}
+
+	case "delete_group":
+		output, err = runCommand("net", "localgroup", action.Username, "/delete")
+
+	case "add_to_group":
+		group := action.Params["group"]
+		if group == "" {
+			reportResult(c, action.ID, "failed", "no group specified")
+			return
+		}
+		output, err = runCommand("net", "localgroup", group, action.Username, "/add")
+
+	case "remove_from_group":
+		group := action.Params["group"]
+		if group == "" {
+			reportResult(c, action.ID, "failed", "no group specified")
+			return
+		}
+		output, err = runCommand("net", "localgroup", group, action.Username, "/delete")
 
 	default:
 		log.Printf("Unknown action type: %s\n", action.Type)
@@ -180,6 +219,7 @@ func Run() error {
 	}
 
 	for {
+		// Enumerate and upload accounts
 		accs, err := accounts.Enumerate()
 		if err != nil {
 			log.Println("Error enumerating accounts:", err)
@@ -192,6 +232,20 @@ func Run() error {
 			}
 		}
 
+		// Enumerate and upload groups
+		groups, err := accounts.EnumerateGroups()
+		if err != nil {
+			log.Println("Error enumerating groups:", err)
+		} else {
+			log.Printf("Found %d groups — uploading...\n", len(groups))
+			if err := uploadGroups(c, deviceID, groups); err != nil {
+				log.Println("Failed to upload groups:", err)
+			} else {
+				log.Println("Groups uploaded successfully")
+			}
+		}
+
+		// Poll and execute actions
 		actions, err := pollActions(c, deviceID)
 		if err != nil {
 			log.Println("Failed to poll actions:", err)
