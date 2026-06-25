@@ -53,6 +53,7 @@ func initDB() {
 		machine_id  TEXT NOT NULL,
 		type        TEXT NOT NULL,
 		username    TEXT NOT NULL,
+		created_by  TEXT NOT NULL DEFAULT 'unknown',
 		status      TEXT NOT NULL DEFAULT 'pending',
 		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
 		executed_at DATETIME,
@@ -65,6 +66,10 @@ func initDB() {
 		log.Fatalf("Failed to create schema: %v", err)
 	}
 
+	// Migrate: add created_by column if it doesn't exist yet
+	db.Exec(`ALTER TABLE actions ADD COLUMN created_by TEXT NOT NULL DEFAULT 'unknown'`)
+
+	// Seed default admin if no users exist
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count)
 	if count == 0 {

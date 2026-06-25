@@ -35,13 +35,16 @@ type InventoryRequest struct {
 }
 
 type ActionRow struct {
-	ID        int    `json:"id"`
-	MachineID string `json:"machine_id"`
-	Type      string `json:"type"`
-	Username  string `json:"username"`
-	Status    string `json:"status"`
-	CreatedAt string `json:"created_at"`
-	Result    string `json:"result"`
+	ID          int    `json:"id"`
+	MachineID   string `json:"machine_id"`
+	Hostname    string `json:"hostname"`
+	Type        string `json:"type"`
+	Username    string `json:"username"`
+	CreatedBy   string `json:"created_by"`
+	Status      string `json:"status"`
+	CreatedAt   string `json:"created_at"`
+	ExecutedAt  string `json:"executed_at"`
+	Result      string `json:"result"`
 }
 
 type CreateActionRequest struct {
@@ -83,7 +86,7 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// ── Agent handlers (no JWT — agents use machine tokens) ───────────────────────
+// ── Agent handlers ────────────────────────────────────────────────────────────
 
 func registerHandler(w http.ResponseWriter, r *http.Request) {
 	var req RegisterRequest
@@ -132,7 +135,6 @@ func inventoryHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// Agent polls this to get pending actions for its machine
 func agentActionsHandler(w http.ResponseWriter, r *http.Request) {
 	deviceID := r.URL.Query().Get("device_id")
 	if deviceID == "" {
@@ -141,7 +143,8 @@ func agentActionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(`
-		SELECT id, machine_id, type, username, status, created_at, COALESCE(result, '')
+		SELECT id, machine_id, '', type, username, created_by, status, created_at,
+			COALESCE(executed_at, ''), COALESCE(result, '')
 		FROM actions WHERE machine_id = ? AND status = 'pending'
 		ORDER BY created_at ASC
 	`, deviceID)
@@ -154,13 +157,13 @@ func agentActionsHandler(w http.ResponseWriter, r *http.Request) {
 	actions := []ActionRow{}
 	for rows.Next() {
 		var a ActionRow
-		rows.Scan(&a.ID, &a.MachineID, &a.Type, &a.Username, &a.Status, &a.CreatedAt, &a.Result)
+		rows.Scan(&a.ID, &a.MachineID, &a.Hostname, &a.Type, &a.Username,
+			&a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
 		actions = append(actions, a)
 	}
 	json.NewEncoder(w).Encode(actions)
 }
 
-// Agent reports back result of an executed action
 func actionResultHandler(w http.ResponseWriter, r *http.Request) {
 	var req ActionResultRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -177,7 +180,7 @@ func actionResultHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// ── Dashboard handlers (JWT protected) ───────────────────────────────────────
+// ── Dashboard handlers ────────────────────────────────────────────────────────
 
 func machinesHandler(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query(`SELECT id, hostname, last_seen FROM machines ORDER BY last_seen DESC`)
@@ -231,8 +234,13 @@ func accountsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(accounts)
 }
 
-// Dashboard creates a new action to be picked up by the agent
 func createActionHandler(w http.ResponseWriter, r *http.Request) {
+	// Get the dashboard user who is creating this action
+	createdBy := getUsernameFromToken(r)
+	if createdBy == "" {
+		createdBy = "unknown"
+	}
+
 	var req CreateActionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -249,20 +257,20 @@ func createActionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := db.Exec(`
-		INSERT INTO actions (machine_id, type, username, status)
-		VALUES (?, ?, ?, 'pending')
-	`, req.MachineID, req.Type, req.Username)
+		INSERT INTO actions (machine_id, type, username, created_by, status)
+		VALUES (?, ?, ?, ?, 'pending')
+	`, req.MachineID, req.Type, req.Username, createdBy)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	id, _ := result.LastInsertId()
-	log.Printf("Action queued: %s %s on %s (id: %d)\n", req.Type, req.Username, req.MachineID, id)
+	log.Printf("Action queued: %s %s on %s by %s (id: %d)\n",
+		req.Type, req.Username, req.MachineID, createdBy, id)
 	json.NewEncoder(w).Encode(map[string]int64{"action_id": id})
 }
 
-// Dashboard polls action status
 func actionsStatusHandler(w http.ResponseWriter, r *http.Request) {
 	machineID := r.URL.Query().Get("machine_id")
 	if machineID == "" {
@@ -271,7 +279,8 @@ func actionsStatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(`
-		SELECT id, machine_id, type, username, status, created_at, COALESCE(result, '')
+		SELECT id, machine_id, '', type, username, created_by, status, created_at,
+			COALESCE(executed_at, ''), COALESCE(result, '')
 		FROM actions WHERE machine_id = ?
 		ORDER BY created_at DESC LIMIT 50
 	`, machineID)
@@ -284,7 +293,34 @@ func actionsStatusHandler(w http.ResponseWriter, r *http.Request) {
 	actions := []ActionRow{}
 	for rows.Next() {
 		var a ActionRow
-		rows.Scan(&a.ID, &a.MachineID, &a.Type, &a.Username, &a.Status, &a.CreatedAt, &a.Result)
+		rows.Scan(&a.ID, &a.MachineID, &a.Hostname, &a.Type, &a.Username,
+			&a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
+		actions = append(actions, a)
+	}
+	json.NewEncoder(w).Encode(actions)
+}
+
+// Audit log — all actions across all machines with hostname joined
+func auditLogHandler(w http.ResponseWriter, r *http.Request) {
+	rows, err := db.Query(`
+		SELECT a.id, a.machine_id, m.hostname, a.type, a.username, a.created_by,
+			a.status, a.created_at, COALESCE(a.executed_at, ''), COALESCE(a.result, '')
+		FROM actions a
+		LEFT JOIN machines m ON a.machine_id = m.id
+		ORDER BY a.created_at DESC
+		LIMIT 200
+	`)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	actions := []ActionRow{}
+	for rows.Next() {
+		var a ActionRow
+		rows.Scan(&a.ID, &a.MachineID, &a.Hostname, &a.Type, &a.Username,
+			&a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
 		actions = append(actions, a)
 	}
 	json.NewEncoder(w).Encode(actions)
@@ -303,7 +339,6 @@ func main() {
 	http.HandleFunc("/action-result", corsMiddleware(actionResultHandler))
 
 	// Auth
-	// Auth
 	http.HandleFunc("/login", corsMiddleware(loginHandler))
 	http.HandleFunc("/change-password", corsMiddleware(authMiddleware(changePasswordHandler)))
 
@@ -312,6 +347,7 @@ func main() {
 	http.HandleFunc("/accounts", corsMiddleware(authMiddleware(accountsHandler)))
 	http.HandleFunc("/actions/create", corsMiddleware(authMiddleware(createActionHandler)))
 	http.HandleFunc("/actions/status", corsMiddleware(authMiddleware(actionsStatusHandler)))
+	http.HandleFunc("/audit", corsMiddleware(authMiddleware(auditLogHandler)))
 
 	log.Println("Backend running on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))

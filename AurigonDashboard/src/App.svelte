@@ -16,16 +16,22 @@
   let search = '';
   let filter = 'all';
   let actionStatus = {};
-  let recentActions = [];
 
-  // Settings state
-  let view = 'accounts'; // 'accounts' | 'settings'
+  let view = 'accounts'; // 'accounts' | 'audit' | 'settings'
+
+  // Settings
   let currentPassword = '';
   let newPassword = '';
   let confirmPassword = '';
   let passwordError = null;
   let passwordSuccess = false;
   let passwordLoading = false;
+
+  // Audit log
+  let auditLog = [];
+  let auditLoading = false;
+  let auditError = null;
+  let auditSearch = '';
 
   const BASE = 'http://localhost:8080';
 
@@ -35,7 +41,7 @@
     if (saved) { token = saved; currentUser = savedUser; loadMachines(); }
   });
 
-  // ── Auth ─────────────────────────────────────────────────────────────────────
+  // ── Auth ──────────────────────────────────────────────────────────────────────
 
   async function login() {
     loginLoading = true; loginError = null;
@@ -57,7 +63,7 @@
 
   function logout() {
     token = null; currentUser = null; machines = []; accounts = []; selectedMachine = null;
-    view = 'accounts';
+    view = 'accounts'; auditLog = [];
     sessionStorage.removeItem('aurigon_token'); sessionStorage.removeItem('aurigon_user');
   }
 
@@ -68,50 +74,50 @@
   // ── Change password ───────────────────────────────────────────────────────────
 
   async function changePassword() {
-    passwordError = null;
-    passwordSuccess = false;
-
-    if (newPassword.length < 8) {
-      passwordError = 'New password must be at least 8 characters.';
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      passwordError = 'New passwords do not match.';
-      return;
-    }
-
+    passwordError = null; passwordSuccess = false;
+    if (newPassword.length < 8) { passwordError = 'New password must be at least 8 characters.'; return; }
+    if (newPassword !== confirmPassword) { passwordError = 'New passwords do not match.'; return; }
     passwordLoading = true;
     try {
       const res = await fetch(`${BASE}/change-password`, {
-        method: 'POST',
-        headers: authHeaders(),
+        method: 'POST', headers: authHeaders(),
         body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
       });
-      if (!res.ok) {
-        const msg = await res.text();
-        throw new Error(msg || 'Failed to change password');
-      }
+      if (!res.ok) throw new Error(await res.text());
       passwordSuccess = true;
-      currentPassword = '';
-      newPassword = '';
-      confirmPassword = '';
-    } catch (e) {
-      passwordError = e.message;
-    } finally {
-      passwordLoading = false;
-    }
+      currentPassword = ''; newPassword = ''; confirmPassword = '';
+    } catch (e) { passwordError = e.message; }
+    finally { passwordLoading = false; }
   }
 
   function openSettings() {
     view = 'settings';
-    passwordError = null;
-    passwordSuccess = false;
-    currentPassword = '';
-    newPassword = '';
-    confirmPassword = '';
+    passwordError = null; passwordSuccess = false;
+    currentPassword = ''; newPassword = ''; confirmPassword = '';
   }
 
-  // ── Data ─────────────────────────────────────────────────────────────────────
+  // ── Audit log ─────────────────────────────────────────────────────────────────
+
+  async function openAuditLog() {
+    view = 'audit';
+    auditLoading = true; auditError = null;
+    try {
+      const res = await fetch(`${BASE}/audit`, { headers: authHeaders() });
+      if (res.status === 401) { logout(); return; }
+      if (!res.ok) throw new Error(await res.text());
+      auditLog = await res.json();
+    } catch (e) { auditError = e.message; }
+    finally { auditLoading = false; }
+  }
+
+  $: filteredAudit = auditLog.filter(a =>
+    a.username.toLowerCase().includes(auditSearch.toLowerCase()) ||
+    a.hostname.toLowerCase().includes(auditSearch.toLowerCase()) ||
+    a.created_by.toLowerCase().includes(auditSearch.toLowerCase()) ||
+    a.type.toLowerCase().includes(auditSearch.toLowerCase())
+  );
+
+  // ── Data ──────────────────────────────────────────────────────────────────────
 
   async function loadMachines() {
     loading = true; error = null;
@@ -136,7 +142,7 @@
       ]);
       if (accRes.status === 401) { logout(); return; }
       accounts = await accRes.json();
-      recentActions = actRes.ok ? await actRes.json() : [];
+      const recentActions = actRes.ok ? await actRes.json() : [];
       actionStatus = {};
       for (const a of recentActions) {
         if (a.status === 'pending') actionStatus[a.username] = 'pending';
@@ -150,8 +156,7 @@
     actionStatus = { ...actionStatus, [username]: 'pending' };
     try {
       const res = await fetch(`${BASE}/actions/create`, {
-        method: 'POST',
-        headers: authHeaders(),
+        method: 'POST', headers: authHeaders(),
         body: JSON.stringify({ machine_id: selectedMachine.id, type, username }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -175,11 +180,8 @@
         }
         const hadPending = Object.values(actionStatus).some(s => s === 'pending');
         const stillPending = Object.values(newStatus).some(s => s === 'pending');
-        if (hadPending && !stillPending) {
-          await selectMachine(selectedMachine);
-        } else {
-          actionStatus = newStatus;
-        }
+        if (hadPending && !stillPending) await selectMachine(selectedMachine);
+        else actionStatus = newStatus;
       } catch {}
     }, 10000);
   }
@@ -207,6 +209,19 @@
     if (!d) return '—';
     try { return new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }); }
     catch { return '—'; }
+  }
+
+  function formatDateTime(d) {
+    if (!d) return '—';
+    try {
+      return new Date(d).toLocaleString('en-US', {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+      });
+    } catch { return '—'; }
+  }
+
+  function actionLabel(type) {
+    return type === 'disable_account' ? 'Disabled' : type === 'enable_account' ? 'Enabled' : type;
   }
 
   function isOnline(lastSeen) {
@@ -266,6 +281,9 @@
       {/if}
 
       <div class="nav-label" style="margin-top:20px">Views</div>
+      <button class="nav-item-btn {view === 'audit' ? 'active' : ''}" on:click={openAuditLog}>
+        <span class="nav-icon">◈</span> Audit log
+      </button>
       <a class="nav-item nav-disabled" href="#groups">
         <span class="nav-icon">◉</span> Groups <span class="nav-soon">soon</span>
       </a>
@@ -288,8 +306,79 @@
 
   <main class="main">
 
+    <!-- ── Audit log view ── -->
+    {#if view === 'audit'}
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1 class="page-title">Audit log</h1>
+          <p class="page-sub">All account actions across all machines</p>
+        </div>
+        <input class="search" type="text" placeholder="Search machine, user, action…" bind:value={auditSearch}/>
+      </header>
+
+      {#if auditLoading}
+        <div class="state-box"><div class="spinner"></div><p>Loading…</p></div>
+      {:else if auditError}
+        <div class="state-box error">
+          <p class="error-title">Could not load audit log</p>
+          <p class="error-detail">{auditError}</p>
+        </div>
+      {:else if filteredAudit.length === 0}
+        <div class="state-box">
+          <p class="empty-title">No actions yet</p>
+          <p class="empty-sub">Actions taken from the dashboard will appear here.</p>
+        </div>
+      {:else}
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Machine</th>
+                <th>Action</th>
+                <th>Account</th>
+                <th>By</th>
+                <th>Status</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each filteredAudit as entry}
+                <tr>
+                  <td class="td-muted td-mono">{formatDateTime(entry.created_at)}</td>
+                  <td class="td-username">{entry.hostname || entry.machine_id}</td>
+                  <td>
+                    {#if entry.type === 'disable_account'}
+                      <span class="badge badge-red">Disabled</span>
+                    {:else if entry.type === 'enable_account'}
+                      <span class="badge badge-green">Enabled</span>
+                    {:else}
+                      <span class="badge badge-ghost">{entry.type}</span>
+                    {/if}
+                  </td>
+                  <td class="td-username">{entry.username}</td>
+                  <td class="td-muted">{entry.created_by}</td>
+                  <td>
+                    {#if entry.status === 'completed'}
+                      <span class="badge badge-green">Done</span>
+                    {:else if entry.status === 'pending'}
+                      <span class="badge badge-amber">Pending</span>
+                    {:else if entry.status === 'failed'}
+                      <span class="badge badge-red">Failed</span>
+                    {:else}
+                      <span class="badge badge-ghost">{entry.status}</span>
+                    {/if}
+                  </td>
+                  <td class="td-muted td-result">{entry.result || '—'}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+
     <!-- ── Settings view ── -->
-    {#if view === 'settings'}
+    {:else if view === 'settings'}
       <header class="topbar">
         <div class="topbar-left">
           <h1 class="page-title">Settings</h1>
@@ -300,14 +389,8 @@
       <div class="settings-card">
         <h2 class="settings-section-title">Change password</h2>
         <p class="settings-section-sub">You are signed in as <strong>{currentUser}</strong>.</p>
-
-        {#if passwordSuccess}
-          <div class="pw-success">Password changed successfully.</div>
-        {/if}
-        {#if passwordError}
-          <div class="pw-error">{passwordError}</div>
-        {/if}
-
+        {#if passwordSuccess}<div class="pw-success">Password changed successfully.</div>{/if}
+        {#if passwordError}<div class="pw-error">{passwordError}</div>{/if}
         <div class="settings-fields">
           <div class="field">
             <label class="field-label" for="cur-pw">Current password</label>
@@ -427,7 +510,6 @@
         </div>
       {/if}
     {/if}
-
   </main>
 </div>
 {/if}
@@ -440,7 +522,6 @@
     font-family: 'Inter', system-ui, sans-serif; font-size: 14px; line-height: 1.5;
   }
 
-  /* Login */
   .login-shell { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
   .login-card { width: 360px; background: #111318; border: 1px solid #1e2028; border-radius: 14px; padding: 36px 32px; display: flex; flex-direction: column; gap: 16px; }
   .login-brand { display: flex; align-items: center; gap: 10px; }
@@ -453,11 +534,10 @@
   .field-input { background: #0d0f12; border: 1px solid #1e2028; border-radius: 8px; color: #d0d3e0; font-size: 14px; padding: 10px 14px; outline: none; transition: border-color 0.15s; }
   .field-input:focus { border-color: #6c8fff55; }
   .field-input::placeholder { color: #2e3248; }
-  .login-btn { background: #6c8fff; color: #fff; border: none; border-radius: 8px; padding: 11px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.15s, opacity 0.15s; }
+  .login-btn { background: #6c8fff; color: #fff; border: none; border-radius: 8px; padding: 11px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.15s; }
   .login-btn:hover { background: #5a7aee; }
   .login-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
-  /* Shell */
   .shell { display: flex; min-height: 100vh; }
   .sidebar { width: 220px; min-height: 100vh; background: #111318; border-right: 1px solid #1e2028; display: flex; flex-direction: column; padding: 24px 0; flex-shrink: 0; }
   .brand { display: flex; align-items: center; gap: 10px; padding: 0 20px 28px; border-bottom: 1px solid #1e2028; }
@@ -468,6 +548,9 @@
   .machine-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; border-radius: 6px; background: none; border: none; color: #8a8fa8; font-size: 13px; cursor: pointer; text-align: left; margin-bottom: 2px; transition: background 0.15s, color 0.15s; }
   .machine-item:hover { background: #1a1d25; color: #d0d3e0; }
   .machine-item.active { background: #1a2240; color: #6c8fff; }
+  .nav-item-btn { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; border-radius: 6px; background: none; border: none; color: #8a8fa8; font-size: 13px; cursor: pointer; text-align: left; margin-bottom: 2px; transition: background 0.15s, color 0.15s; }
+  .nav-item-btn:hover { background: #1a1d25; color: #d0d3e0; }
+  .nav-item-btn.active { background: #1a2240; color: #6c8fff; }
   .status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
   .status-dot.online { background: #3ecf8e; box-shadow: 0 0 6px #3ecf8e88; }
   .status-dot.offline { background: #3a3f52; }
@@ -477,20 +560,10 @@
   .nav-disabled { opacity: 0.4; pointer-events: none; }
   .nav-icon { font-size: 14px; }
   .nav-soon { margin-left: auto; font-size: 10px; background: #1e2028; color: #4a4f5e; padding: 1px 6px; border-radius: 4px; }
-
   .sidebar-footer { padding: 16px 20px; margin-top: auto; border-top: 1px solid #1e2028; display: flex; flex-direction: column; gap: 10px; }
-
-  .settings-btn {
-    display: flex; align-items: center; gap: 8px;
-    width: 100%; padding: 7px 10px; border-radius: 6px;
-    background: none; border: 1px solid #1e2028;
-    color: #6a7090; font-size: 12px; cursor: pointer;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
-    text-align: left;
-  }
+  .settings-btn { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border-radius: 6px; background: none; border: 1px solid #1e2028; color: #6a7090; font-size: 12px; cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s; text-align: left; }
   .settings-btn:hover { background: #1a1d25; color: #d0d3e0; border-color: #2a2f3e; }
   .settings-btn.active { background: #1a2240; color: #6c8fff; border-color: #6c8fff44; }
-
   .user-row { display: flex; align-items: center; justify-content: space-between; }
   .user-name { font-size: 13px; color: #6a7090; }
   .logout-btn { background: none; border: 1px solid #1e2028; border-radius: 5px; color: #4a4f5e; font-size: 11px; padding: 3px 8px; cursor: pointer; transition: color 0.15s, border-color 0.15s; }
@@ -499,7 +572,6 @@
   .pill-dot { width: 7px; height: 7px; border-radius: 50%; background: #3ecf8e; box-shadow: 0 0 6px #3ecf8e88; flex-shrink: 0; }
   .pill-label { font-size: 12px; color: #6a7090; }
 
-  /* Main */
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; padding: 32px 36px; }
   .topbar { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 28px; gap: 16px; }
   .page-title { font-size: 22px; font-weight: 600; color: #f0f1f3; letter-spacing: -0.01em; }
@@ -508,7 +580,6 @@
   .search:focus { border-color: #6c8fff55; }
   .search::placeholder { color: #3a3f52; }
 
-  /* Settings */
   .settings-card { background: #111318; border: 1px solid #1e2028; border-radius: 10px; padding: 28px 32px; max-width: 480px; }
   .settings-section-title { font-size: 16px; font-weight: 600; color: #f0f1f3; margin-bottom: 6px; }
   .settings-section-sub { font-size: 13px; color: #4a4f5e; margin-bottom: 20px; }
@@ -516,11 +587,10 @@
   .settings-fields { display: flex; flex-direction: column; gap: 14px; }
   .pw-success { background: #0d2e1f; border: 1px solid #1a5a3a; border-radius: 7px; padding: 10px 14px; font-size: 13px; color: #3ecf8e; margin-bottom: 6px; }
   .pw-error { background: #2a1010; border: 1px solid #5a2020; border-radius: 7px; padding: 10px 14px; font-size: 13px; color: #e55; margin-bottom: 6px; }
-  .save-btn { background: #6c8fff; color: #fff; border: none; border-radius: 8px; padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer; align-self: flex-start; transition: background 0.15s, opacity 0.15s; margin-top: 4px; }
+  .save-btn { background: #6c8fff; color: #fff; border: none; border-radius: 8px; padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer; align-self: flex-start; transition: background 0.15s; margin-top: 4px; }
   .save-btn:hover { background: #5a7aee; }
   .save-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
-  /* Stats */
   .stats-row { display: flex; gap: 12px; margin-bottom: 24px; }
   .stat-card { flex: 1; background: #111318; border: 1px solid #1e2028; border-radius: 10px; padding: 16px 18px; cursor: pointer; text-align: left; transition: border-color 0.15s, background 0.15s; display: flex; flex-direction: column; gap: 4px; }
   .stat-card:hover { border-color: #2a2f3e; background: #13161e; }
@@ -531,7 +601,6 @@
   .stat-num.amber { color: #f5a623; }
   .stat-label { font-size: 11px; color: #4a4f5e; text-transform: uppercase; letter-spacing: 0.06em; }
 
-  /* Table */
   .table-wrap { background: #111318; border: 1px solid #1e2028; border-radius: 10px; overflow: hidden; }
   .table { width: 100%; border-collapse: collapse; }
   .table thead tr { border-bottom: 1px solid #1e2028; }
@@ -542,10 +611,12 @@
   .table td { padding: 13px 16px; vertical-align: middle; color: #c8cad4; }
   .td-username { font-weight: 500; color: #e2e4e9; }
   .td-muted { color: #4a4f5e; font-size: 13px; }
+  .td-mono { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
   .td-sid { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #3a3f52; }
   .td-actions { white-space: nowrap; }
+  .td-result { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  .action-btn { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 5px; border: none; cursor: pointer; transition: opacity 0.15s; letter-spacing: 0.03em; }
+  .action-btn { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 5px; border: none; cursor: pointer; letter-spacing: 0.03em; }
   .action-disable { background: #2a1010; color: #e55; border: 1px solid #5a2020; }
   .action-disable:hover { background: #3a1515; }
   .action-enable { background: #0d2e1f; color: #3ecf8e; border: 1px solid #1a5a3a; }
@@ -557,6 +628,7 @@
   .badge-green  { background: #0d2e1f; color: #3ecf8e; }
   .badge-gray   { background: #1a1d25; color: #4a4f5e; }
   .badge-amber  { background: #2e1f08; color: #f5a623; }
+  .badge-red    { background: #2a1010; color: #e55; }
   .badge-ghost  { background: transparent; color: #3a3f52; border: 1px solid #1e2028; }
 
   .state-box { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: #4a4f5e; padding: 80px 0; }
