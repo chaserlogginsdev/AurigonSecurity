@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 )
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -80,6 +81,25 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// agentAuthMiddleware verifies the shared agent API key
+func agentAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		expectedKey := os.Getenv("AURIGON_AGENT_KEY")
+		if expectedKey == "" {
+			// No key set — warn but allow (dev mode)
+			next(w, r)
+			return
+		}
+		key := r.Header.Get("X-Agent-Key")
+		if key != expectedKey {
+			log.Printf("Rejected agent request from %s — invalid key\n", r.RemoteAddr)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		next(w, r)
@@ -332,11 +352,11 @@ func main() {
 	initDB()
 	initJWT()
 
-	// Agent endpoints (no JWT)
-	http.HandleFunc("/register", corsMiddleware(registerHandler))
-	http.HandleFunc("/inventory", corsMiddleware(inventoryHandler))
-	http.HandleFunc("/actions", corsMiddleware(agentActionsHandler))
-	http.HandleFunc("/action-result", corsMiddleware(actionResultHandler))
+	// Agent endpoints — protected by shared key
+	http.HandleFunc("/register", corsMiddleware(agentAuthMiddleware(registerHandler)))
+	http.HandleFunc("/inventory", corsMiddleware(agentAuthMiddleware(inventoryHandler)))
+	http.HandleFunc("/actions", corsMiddleware(agentAuthMiddleware(agentActionsHandler)))
+	http.HandleFunc("/action-result", corsMiddleware(agentAuthMiddleware(actionResultHandler)))
 
 	// Auth
 	http.HandleFunc("/login", corsMiddleware(loginHandler))

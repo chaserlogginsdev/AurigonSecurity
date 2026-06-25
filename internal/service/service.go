@@ -1,11 +1,11 @@
 package service
 
 import (
-	"bytes"
 	"encoding/json"
 	"log"
 	"os"
 	"os/exec"
+	"bytes"
 	"time"
 
 	"aurigon-agent/internal/accounts"
@@ -99,16 +99,12 @@ func executeAction(c *client.Client, action ActionRow) {
 	} else {
 		log.Printf("Action %d succeeded: %s %s\n", action.ID, action.Type, action.Username)
 		reportResult(c, action.ID, "completed", "success")
-		// Trigger immediate re-enumeration so dashboard reflects the change
-		accs, err := accounts.Enumerate()
-		if err == nil {
-			uploadInventory(c, "", accs) // deviceID will be re-set from token
-		}
 	}
 }
 
 func Run() error {
-	c := client.New("http://localhost:8080")
+	agentKey := os.Getenv("AURIGON_AGENT_KEY")
+	c := client.New("http://localhost:8080", agentKey)
 
 	deviceID, err := register(c)
 	if err != nil {
@@ -116,7 +112,6 @@ func Run() error {
 	}
 
 	for {
-		// Enumerate and upload
 		accs, err := accounts.Enumerate()
 		if err != nil {
 			log.Println("Error enumerating accounts:", err)
@@ -129,7 +124,6 @@ func Run() error {
 			}
 		}
 
-		// Poll and execute actions
 		actions, err := pollActions(c, deviceID)
 		if err != nil {
 			log.Println("Failed to poll actions:", err)

@@ -9,15 +9,17 @@ import (
 )
 
 type Client struct {
-	BaseURL string
-	Token   string
-	http    *http.Client
+	BaseURL  string
+	Token    string
+	AgentKey string
+	http     *http.Client
 }
 
-func New(baseURL string) *Client {
+func New(baseURL string, agentKey string) *Client {
 	return &Client{
-		BaseURL: baseURL,
-		http:    &http.Client{Timeout: 10 * time.Second},
+		BaseURL:  baseURL,
+		AgentKey: agentKey,
+		http:     &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -40,6 +42,9 @@ func (c *Client) PostRaw(path string, body []byte) ([]byte, error) {
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
+	if c.AgentKey != "" {
+		req.Header.Set("X-Agent-Key", c.AgentKey)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -55,6 +60,9 @@ func (c *Client) Get(path string) ([]byte, error) {
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	if c.AgentKey != "" {
+		req.Header.Set("X-Agent-Key", c.AgentKey)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
