@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"time"
 )
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -304,7 +303,9 @@ func main() {
 	http.HandleFunc("/action-result", corsMiddleware(actionResultHandler))
 
 	// Auth
+	// Auth
 	http.HandleFunc("/login", corsMiddleware(loginHandler))
+	http.HandleFunc("/change-password", corsMiddleware(authMiddleware(changePasswordHandler)))
 
 	// Dashboard endpoints (JWT protected)
 	http.HandleFunc("/machines", corsMiddleware(authMiddleware(machinesHandler)))
@@ -315,5 +316,3 @@ func main() {
 	log.Println("Backend running on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
-
-var _ = time.Now

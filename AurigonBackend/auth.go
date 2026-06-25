@@ -23,6 +23,8 @@ func initJWT() {
 	jwtSecret = []byte(secret)
 }
 
+// ── Login ─────────────────────────────────────────────────────────────────────
+
 type LoginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
@@ -69,6 +71,83 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Login: %s\n", req.Username)
 	json.NewEncoder(w).Encode(LoginResponse{Token: tokenString, Username: req.Username, Role: role})
+}
+
+// ── Change password ───────────────────────────────────────────────────────────
+
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+func changePasswordHandler(w http.ResponseWriter, r *http.Request) {
+	// Get username from JWT claims
+	username := getUsernameFromToken(r)
+	if username == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req ChangePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.NewPassword) < 8 {
+		http.Error(w, "new password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+
+	// Verify current password
+	var hashedPassword string
+	err := db.QueryRow(`SELECT password FROM users WHERE username = ?`, username).
+		Scan(&hashedPassword)
+	if err != nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(req.CurrentPassword)); err != nil {
+		http.Error(w, "current password is incorrect", http.StatusUnauthorized)
+		return
+	}
+
+	// Hash and save new password
+	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "failed to hash password", http.StatusInternalServerError)
+		return
+	}
+
+	db.Exec(`UPDATE users SET password = ? WHERE username = ?`, string(newHash), username)
+	log.Printf("Password changed for user: %s\n", username)
+	w.WriteHeader(http.StatusOK)
+}
+
+// ── JWT Middleware ────────────────────────────────────────────────────────────
+
+func getUsernameFromToken(r *http.Request) string {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		return ""
+	}
+	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+	token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return jwtSecret, nil
+	})
+	if err != nil || !token.Valid {
+		return ""
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return ""
+	}
+	sub, _ := claims["sub"].(string)
+	return sub
 }
 
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
