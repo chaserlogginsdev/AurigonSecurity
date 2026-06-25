@@ -1,66 +1,82 @@
 package accounts
 
 import (
-    "encoding/json"
-    "os/exec"
+	"encoding/json"
 	"log"
+	"os/exec"
+	"strings"
 )
 
 func Disable(username string) {
-    cmd := exec.Command("net", "user", username, "/active:no")
-    out, err := cmd.CombinedOutput()
-    if err != nil {
-        log.Printf("Failed to disable account %s: %v (%s)\n", username, err, string(out))
-        return
-    }
-
-    log.Printf("Account %s disabled successfully\n", username)
+	cmd := exec.Command("net", "user", username, "/active:no")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("Failed to disable account %s: %v (%s)\n", username, err, string(out))
+		return
+	}
+	log.Printf("Account %s disabled successfully\n", username)
 }
 
+// psUserScript wraps the result in an array explicitly so we always get
+// a JSON array even on PowerShell 5 (which lacks ConvertTo-Json -AsArray).
+const psUserScript = `
+$users = Get-LocalUser | Select-Object Name, Enabled, Description,
+    @{Name='SID';Expression={$_.SID.Value}},
+    @{Name='LastLogon';Expression={if($_.LastLogon){$_.LastLogon.ToString('o')}else{''}}}
+$arr = @($users)
+ConvertTo-Json $arr
+`
+
+const psAdminScript = `
+$members = Get-LocalGroupMember -Group Administrators |
+    Select-Object @{Name='Name';Expression={($_.Name -split '\\')[-1]}}
+$arr = @($members)
+ConvertTo-Json $arr
+`
+
 func Enumerate() ([]LocalAccount, error) {
-    // Get basic local user info
-    cmd := exec.Command("powershell", "-Command", "Get-LocalUser | ConvertTo-Json")
-    out, err := cmd.Output()
-    if err != nil {
-        return nil, err
-    }
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", psUserScript)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
 
-    var users []struct {
-        Name        string `json:"Name"`
-        SID         string `json:"SID"`
-        Enabled     bool   `json:"Enabled"`
-        Description string `json:"Description"`
-        LastLogon   string `json:"LastLogon"`
-    }
+	var users []struct {
+		Name        string `json:"Name"`
+		SID         string `json:"SID"`
+		Enabled     bool   `json:"Enabled"`
+		Description string `json:"Description"`
+		LastLogon   string `json:"LastLogon"`
+	}
+	if err := json.Unmarshal(out, &users); err != nil {
+		return nil, err
+	}
 
-    json.Unmarshal(out, &users)
+	adminCmd := exec.Command("powershell", "-NoProfile", "-Command", psAdminScript)
+	adminOut, err := adminCmd.Output()
 
-    // Get admin group members
-    adminCmd := exec.Command("powershell", "-Command", "Get-LocalGroupMember -Group Administrators | ConvertTo-Json")
-    adminOut, _ := adminCmd.Output()
+	adminMap := map[string]bool{}
+	if err == nil {
+		var admins []struct {
+			Name string `json:"Name"`
+		}
+		if jsonErr := json.Unmarshal(adminOut, &admins); jsonErr == nil {
+			for _, a := range admins {
+				adminMap[strings.TrimSpace(a.Name)] = true
+			}
+		}
+	}
 
-    var admins []struct {
-        Name string `json:"Name"`
-    }
-    json.Unmarshal(adminOut, &admins)
-
-    adminMap := map[string]bool{}
-    for _, a := range admins {
-        adminMap[a.Name] = true
-    }
-
-    // Build final list
-    accounts := []LocalAccount{}
-    for _, u := range users {
-        accounts = append(accounts, LocalAccount{
-            Username:    u.Name,
-            SID:         u.SID,
-            Enabled:     u.Enabled,
-            Description: u.Description,
-            LastLogon:   u.LastLogon,
-            IsAdmin:     adminMap[u.Name],
-        })
-    }
-
-    return accounts, nil
+	result := make([]LocalAccount, 0, len(users))
+	for _, u := range users {
+		result = append(result, LocalAccount{
+			Username:    u.Name,
+			SID:         u.SID,
+			Enabled:     u.Enabled,
+			Description: u.Description,
+			LastLogon:   u.LastLogon,
+			IsAdmin:     adminMap[u.Name],
+		})
+	}
+	return result, nil
 }

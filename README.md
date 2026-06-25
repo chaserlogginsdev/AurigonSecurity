@@ -1,84 +1,93 @@
-# AurigonSecurity Agent
+# Aurigon
 
-AurigonSecurity is a lightweight Windows endpoint agent designed for local account enumeration, security posture reporting, and remote action execution. This repository contains the Go-based agent that runs as a Windows service and communicates with the Aurigon backend.
+A lightweight IT account management platform. Deploy the agent on any Windows machine and manage local user accounts from a central dashboard.
 
-## Features
+## What it does
 
-- Enumerates local Windows accounts (users, SIDs, admin status, last logon)
-- Sends inventory to backend API
-- Polls for remote actions
-- Executes actions (disable account, remove from admin group, etc.)
-- Designed for MSI deployment
-- Multi-tenant support via API key or config file
+- Enumerates local Windows accounts (username, SID, admin status, enabled/disabled, last logon)
+- Displays all accounts per machine in a web dashboard
+- Lets admins disable or enable accounts remotely
+- Persists data across restarts with SQLite
 
-## Project Structure
+## Architecture
 
-AurigonSecurity/
-├── cmd/
-│   └── agent/          # Main entrypoint for the agent
-├── internal/
-│   ├── accounts/       # Account enumeration logic
-│   ├── actions/        # Action execution handlers
-│   ├── client/         # HTTP client for backend communication
-│   ├── config/         # Config loader (API key, backend URL)
-│   └── service/        # Main agent loop
-├── pkg/
-│   └── util/           # Shared utilities
-└── go.mod
+```
+AurigonDashboard (Svelte)  ←→  AurigonBackend (Go)  ←→  aurigon-agent (Go)
+     localhost:5173               localhost:8080          runs on managed machines
+```
 
+- **Dashboard** — Svelte web UI. Login protected with JWT.
+- **Backend** — Go HTTP API. Stores machines, accounts, and action queue in SQLite.
+- **Agent** — Go binary deployed on each managed machine. Polls backend every 30s, uploads account inventory, executes queued actions.
 
-## Getting Started
+## Prerequisites
 
-### Build the agent
+- Go 1.21+
+- Node.js 18+
 
+## Running locally
+
+### 1. Start the backend
+
+```powershell
+cd AurigonBackend
+go build -o aurigon-backend.exe .
+.\aurigon-backend.exe
+```
+
+On first run it creates `aurigon.db` and a default admin account:
+- Username: `admin`
+- Password: `admin123`
+
+### 2. Start the agent (requires Administrator)
+
+Open an elevated PowerShell window:
+
+```powershell
 go build -o aurigon-agent.exe ./cmd/agent
-
-### Run locally
-
 .\aurigon-agent.exe
+```
 
-### Mock Backend
+The agent registers with the backend, enumerates local accounts, and uploads them every 30 seconds.
 
-A mock backend is available for local development and testing.
+### 3. Start the dashboard
+
+```powershell
+cd AurigonDashboard
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173` and sign in with `admin` / `admin123`.
+
+## Project structure
+
+```
+AurigonSecurity/
+├── cmd/agent/main.go          # Agent entry point
+├── internal/
+│   ├── accounts/              # Windows account enumeration (PowerShell)
+│   ├── client/                # Agent HTTP client
+│   └── service/               # Agent main loop (register, enumerate, poll)
+├── AurigonBackend/
+│   ├── main.go                # HTTP API routes and handlers
+│   ├── db.go                  # SQLite schema and init
+│   └── auth.go                # JWT login and middleware
+└── AurigonDashboard/
+    └── src/App.svelte         # Dashboard UI
+```
+
+## Environment variables (backend)
+
+| Variable | Default | Description |
+|---|---|---|
+| `AURIGON_JWT_SECRET` | `aurigon-dev-secret-...` | JWT signing secret — change in production |
+| `AURIGON_ADMIN_PASSWORD` | `admin123` | Password for the default admin user (only used on first run) |
 
 ## Roadmap
 
-- Device registration flow
-- Inventory upload
-- Action polling
-- Windows service integration
-- MSI installer
-- Tenant API key support
-- Production backend
-
-## License
-
-MIT (or your preferred license)
-
-# Check repo status
-git status
-
-# Add all changes
-git add .
-
-# Commit changes with a message
-git commit -m "your message here"
-
-# Push to GitHub
-git push
-
-# Pull latest changes (if working on multiple machines)
-git pull
-
-# View commit history
-git log --oneline --graph --decorate
-
-#Agent Commands
-cd AurigonAgent
-go build -o aurigon-agent.exe ./cmd/agent
-.\aurigon-agent.exe
-
-# Backend Commands
-cd AurigonBackend
-go run main.go
-
+- [ ] Change password UI
+- [ ] Linux and macOS agent support
+- [ ] Add / delete accounts
+- [ ] Local group management
+- [ ] Production deployment guide
