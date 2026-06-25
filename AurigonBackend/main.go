@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"io"
 )
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -349,10 +350,20 @@ func auditLogHandler(w http.ResponseWriter, r *http.Request) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
+	// Set up logging to both stdout and a log file
+	logFile, err := os.OpenFile("aurigon-backend.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("Warning: could not open log file: %v\n", err)
+	} else {
+		defer logFile.Close()
+		log.SetOutput(io.MultiWriter(os.Stdout, logFile))
+	}
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+
 	initDB()
 	initJWT()
 
-	// Agent endpoints — protected by shared key
+	// Agent endpoints (no JWT)
 	http.HandleFunc("/register", corsMiddleware(agentAuthMiddleware(registerHandler)))
 	http.HandleFunc("/inventory", corsMiddleware(agentAuthMiddleware(inventoryHandler)))
 	http.HandleFunc("/actions", corsMiddleware(agentAuthMiddleware(agentActionsHandler)))
