@@ -25,3 +25,11 @@ More help is available by typing NET HELPMSG 2224.
 2026/06/24 23:21:47 service.go:99: Failed to report action result: Post "http://localhost:8080/action-result": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
 2026/06/24 23:22:20 service.go:187: Found 8 accounts — uploading...
 2026/06/24 23:22:30 service.go:189: Failed to upload inventory: Post "http://localhost:8080/inventory": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+2026/06/24 23:25:24 Logging to C:\Users\chase\AurigonSecurity\aurigon-agent.log
+2026/06/24 23:25:24 service.go:35: AURIGON_BACKEND_URL not set, using default: http://localhost:8080
+2026/06/24 23:25:24 service.go:63: Registered as Chase-HP (device: 77fdb54158ca)
+2026/06/24 23:25:26 service.go:187: Found 8 accounts — uploading...
+2026/06/24 23:25:26 service.go:191: Inventory uploaded successfully
+2026/06/24 23:25:26 service.go:199: Got 1 pending action(s)
+2026/06/24 23:25:26 service.go:113: Executing action 5: delete_account test123
+2026/06/24 23:25:26 service.go:163: Action 5 succeeded: delete_account test123
