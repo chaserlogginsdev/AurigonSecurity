@@ -18,7 +18,7 @@
   let filter = 'all';
   let actionStatus = {};
 
-  let view = 'accounts'; // 'accounts' | 'audit' | 'settings' | 'users'
+  let view = 'accounts';
 
   // Settings
   let currentPassword = '';
@@ -45,6 +45,19 @@
   let userFormSuccess = null;
   let userFormLoading = false;
 
+  // Create account modal
+  let showCreateModal = false;
+  let createUsername = '';
+  let createPassword = '';
+  let createIsAdmin = false;
+  let createError = null;
+  let createLoading = false;
+
+  // Delete account confirmation
+  let showDeleteModal = false;
+  let deleteTargetAccount = null;
+  let deleteLoading = false;
+
   const BASE = 'http://localhost:8080';
 
   onMount(() => {
@@ -52,9 +65,7 @@
     const savedUser = sessionStorage.getItem('aurigon_user');
     const savedRole = sessionStorage.getItem('aurigon_role');
     if (saved) {
-      token = saved;
-      currentUser = savedUser;
-      currentRole = savedRole;
+      token = saved; currentUser = savedUser; currentRole = savedRole;
       loadMachines();
     }
   });
@@ -74,9 +85,7 @@
         throw new Error(msg.trim() || 'Invalid username or password');
       }
       const data = await res.json();
-      token = data.token;
-      currentUser = data.username;
-      currentRole = data.role;
+      token = data.token; currentUser = data.username; currentRole = data.role;
       sessionStorage.setItem('aurigon_token', token);
       sessionStorage.setItem('aurigon_user', currentUser);
       sessionStorage.setItem('aurigon_role', currentRole);
@@ -99,6 +108,59 @@
   }
 
   $: isAdmin = currentRole === 'admin';
+
+  // ── Create/Delete account modals ──────────────────────────────────────────────
+
+  function openCreateModal() {
+    createUsername = ''; createPassword = ''; createIsAdmin = false;
+    createError = null; showCreateModal = true;
+  }
+
+  function openDeleteModal(account) {
+    deleteTargetAccount = account;
+    showDeleteModal = true;
+  }
+
+  async function submitCreateAccount() {
+    createError = null;
+    if (!createUsername) { createError = 'Username is required.'; return; }
+    if (createPassword.length < 8) { createError = 'Password must be at least 8 characters.'; return; }
+    createLoading = true;
+    try {
+      const res = await fetch(`${BASE}/actions/create`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({
+          machine_id: selectedMachine.id,
+          type: 'create_account',
+          username: createUsername,
+          params: { password: createPassword, is_admin: createIsAdmin ? 'true' : 'false' }
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      actionStatus = { ...actionStatus, [createUsername]: 'pending' };
+      showCreateModal = false;
+    } catch (e) { createError = e.message; }
+    finally { createLoading = false; }
+  }
+
+  async function submitDeleteAccount() {
+    deleteLoading = true;
+    try {
+      const res = await fetch(`${BASE}/actions/create`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({
+          machine_id: selectedMachine.id,
+          type: 'delete_account',
+          username: deleteTargetAccount.username,
+          params: {}
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      actionStatus = { ...actionStatus, [deleteTargetAccount.username]: 'pending' };
+      showDeleteModal = false;
+    } catch (e) { error = e.message; }
+    finally { deleteLoading = false; }
+  }
 
   // ── Change password ───────────────────────────────────────────────────────────
 
@@ -128,8 +190,7 @@
   // ── User management ───────────────────────────────────────────────────────────
 
   async function openUsers() {
-    view = 'users';
-    usersLoading = true; usersError = null;
+    view = 'users'; usersLoading = true; usersError = null;
     userFormError = null; userFormSuccess = null;
     newUsername = ''; newUserPassword = ''; newUserRole = 'viewer';
     try {
@@ -153,7 +214,6 @@
       if (!res.ok) throw new Error(await res.text());
       userFormSuccess = `User "${newUsername}" created successfully.`;
       newUsername = ''; newUserPassword = ''; newUserRole = 'viewer';
-      // Refresh user list
       const listRes = await fetch(`${BASE}/users`, { headers: authHeaders() });
       users = await listRes.json();
     } catch (e) { userFormError = e.message; }
@@ -175,8 +235,7 @@
   // ── Audit log ─────────────────────────────────────────────────────────────────
 
   async function openAuditLog() {
-    view = 'audit';
-    auditLoading = true; auditError = null;
+    view = 'audit'; auditLoading = true; auditError = null;
     try {
       const res = await fetch(`${BASE}/audit`, { headers: authHeaders() });
       if (res.status === 401) { logout(); return; }
@@ -227,13 +286,13 @@
     finally { loading = false; }
   }
 
-  async function triggerAction(type, username) {
+  async function triggerAction(type, username, params = {}) {
     if (!selectedMachine) return;
     actionStatus = { ...actionStatus, [username]: 'pending' };
     try {
       const res = await fetch(`${BASE}/actions/create`, {
         method: 'POST', headers: authHeaders(),
-        body: JSON.stringify({ machine_id: selectedMachine.id, type, username }),
+        body: JSON.stringify({ machine_id: selectedMachine.id, type, username, params }),
       });
       if (!res.ok) throw new Error(await res.text());
     } catch (e) {
@@ -289,11 +348,19 @@
 
   function formatDateTime(d) {
     if (!d) return '—';
-    try {
-      return new Date(d).toLocaleString('en-US', {
-        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
-      });
-    } catch { return '—'; }
+    try { return new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+    catch { return '—'; }
+  }
+
+  function actionLabel(type) {
+    const labels = { disable_account: 'Disabled', enable_account: 'Enabled', create_account: 'Created', delete_account: 'Deleted' };
+    return labels[type] || type;
+  }
+
+  function actionBadgeClass(type) {
+    if (type === 'disable_account' || type === 'delete_account') return 'badge-red';
+    if (type === 'enable_account' || type === 'create_account') return 'badge-green';
+    return 'badge-ghost';
   }
 
   function isOnline(lastSeen) {
@@ -302,7 +369,10 @@
   }
 
   function handleKeydown(e) { if (e.key === 'Enter') login(); }
+  function handleModalKeydown(e) { if (e.key === 'Escape') { showCreateModal = false; showDeleteModal = false; } }
 </script>
+
+<svelte:window on:keydown={handleModalKeydown}/>
 
 <!-- ── Login ── -->
 {#if !token}
@@ -391,8 +461,6 @@
           <p class="page-sub">Manage dashboard access</p>
         </div>
       </header>
-
-      <!-- Create user form -->
       <div class="settings-card" style="margin-bottom: 24px">
         <h2 class="settings-section-title">Add user</h2>
         {#if userFormSuccess}<div class="pw-success">{userFormSuccess}</div>{/if}
@@ -401,13 +469,11 @@
           <div class="form-row">
             <div class="field" style="flex:1">
               <label class="field-label" for="new-username">Username</label>
-              <input id="new-username" class="field-input" type="text" placeholder="johndoe"
-                bind:value={newUsername}/>
+              <input id="new-username" class="field-input" type="text" placeholder="johndoe" bind:value={newUsername}/>
             </div>
             <div class="field" style="flex:1">
               <label class="field-label" for="new-user-pw">Password</label>
-              <input id="new-user-pw" class="field-input" type="password" placeholder="Min 8 characters"
-                bind:value={newUserPassword}/>
+              <input id="new-user-pw" class="field-input" type="password" placeholder="Min 8 characters" bind:value={newUserPassword}/>
             </div>
             <div class="field">
               <label class="field-label" for="new-user-role">Role</label>
@@ -422,8 +488,6 @@
           </button>
         </div>
       </div>
-
-      <!-- Users table -->
       {#if usersLoading}
         <div class="state-box"><div class="spinner"></div><p>Loading…</p></div>
       {:else if usersError}
@@ -431,17 +495,13 @@
       {:else}
         <div class="table-wrap">
           <table class="table">
-            <thead>
-              <tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr>
-            </thead>
+            <thead><tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr></thead>
             <tbody>
               {#each users as user}
                 <tr>
                   <td class="td-username">
                     {user.username}
-                    {#if user.username === currentUser}
-                      <span class="you-badge">you</span>
-                    {/if}
+                    {#if user.username === currentUser}<span class="you-badge">you</span>{/if}
                   </td>
                   <td>
                     {#if user.role === 'admin'}
@@ -453,10 +513,7 @@
                   <td class="td-muted">{formatDate(user.created_at)}</td>
                   <td class="td-actions">
                     {#if user.username !== currentUser}
-                      <button class="action-btn action-disable"
-                        on:click={() => deleteUser(user.username)}>
-                        Delete
-                      </button>
+                      <button class="action-btn action-disable" on:click={() => deleteUser(user.username)}>Delete</button>
                     {:else}
                       <span class="action-self">—</span>
                     {/if}
@@ -477,54 +534,29 @@
         </div>
         <input class="search" type="text" placeholder="Search machine, user, action…" bind:value={auditSearch}/>
       </header>
-
       {#if auditLoading}
         <div class="state-box"><div class="spinner"></div><p>Loading…</p></div>
       {:else if auditError}
-        <div class="state-box error">
-          <p class="error-title">Could not load audit log</p>
-          <p class="error-detail">{auditError}</p>
-        </div>
+        <div class="state-box error"><p class="error-title">Could not load audit log</p><p class="error-detail">{auditError}</p></div>
       {:else if filteredAudit.length === 0}
-        <div class="state-box">
-          <p class="empty-title">No actions yet</p>
-          <p class="empty-sub">Actions taken from the dashboard will appear here.</p>
-        </div>
+        <div class="state-box"><p class="empty-title">No actions yet</p><p class="empty-sub">Actions taken from the dashboard will appear here.</p></div>
       {:else}
         <div class="table-wrap">
           <table class="table">
-            <thead>
-              <tr>
-                <th>When</th><th>Machine</th><th>Action</th>
-                <th>Account</th><th>By</th><th>Status</th><th>Result</th>
-              </tr>
-            </thead>
+            <thead><tr><th>When</th><th>Machine</th><th>Action</th><th>Account</th><th>By</th><th>Status</th><th>Result</th></tr></thead>
             <tbody>
               {#each filteredAudit as entry}
                 <tr>
                   <td class="td-muted td-mono">{formatDateTime(entry.created_at)}</td>
                   <td class="td-username">{entry.hostname || entry.machine_id}</td>
-                  <td>
-                    {#if entry.type === 'disable_account'}
-                      <span class="badge badge-red">Disabled</span>
-                    {:else if entry.type === 'enable_account'}
-                      <span class="badge badge-green">Enabled</span>
-                    {:else}
-                      <span class="badge badge-ghost">{entry.type}</span>
-                    {/if}
-                  </td>
+                  <td><span class="badge {actionBadgeClass(entry.type)}">{actionLabel(entry.type)}</span></td>
                   <td class="td-username">{entry.username}</td>
                   <td class="td-muted">{entry.created_by}</td>
                   <td>
-                    {#if entry.status === 'completed'}
-                      <span class="badge badge-green">Done</span>
-                    {:else if entry.status === 'pending'}
-                      <span class="badge badge-amber">Pending</span>
-                    {:else if entry.status === 'failed'}
-                      <span class="badge badge-red">Failed</span>
-                    {:else}
-                      <span class="badge badge-ghost">{entry.status}</span>
-                    {/if}
+                    {#if entry.status === 'completed'}<span class="badge badge-green">Done</span>
+                    {:else if entry.status === 'pending'}<span class="badge badge-amber">Pending</span>
+                    {:else if entry.status === 'failed'}<span class="badge badge-red">Failed</span>
+                    {:else}<span class="badge badge-ghost">{entry.status}</span>{/if}
                   </td>
                   <td class="td-muted td-result">{entry.result || '—'}</td>
                 </tr>
@@ -542,29 +574,23 @@
           <p class="page-sub">Manage your account</p>
         </div>
       </header>
-
       <div class="settings-card">
         <h2 class="settings-section-title">Change password</h2>
-        <p class="settings-section-sub">You are signed in as <strong>{currentUser}</strong>
-          <span class="role-badge {currentRole}" style="margin-left:6px">{currentRole}</span>
-        </p>
+        <p class="settings-section-sub">Signed in as <strong>{currentUser}</strong> <span class="role-badge {currentRole}" style="margin-left:4px">{currentRole}</span></p>
         {#if passwordSuccess}<div class="pw-success">Password changed successfully.</div>{/if}
         {#if passwordError}<div class="pw-error">{passwordError}</div>{/if}
         <div class="settings-fields">
           <div class="field">
             <label class="field-label" for="cur-pw">Current password</label>
-            <input id="cur-pw" class="field-input" type="password" placeholder="••••••••"
-              bind:value={currentPassword} autocomplete="current-password"/>
+            <input id="cur-pw" class="field-input" type="password" placeholder="••••••••" bind:value={currentPassword} autocomplete="current-password"/>
           </div>
           <div class="field">
             <label class="field-label" for="new-pw">New password</label>
-            <input id="new-pw" class="field-input" type="password" placeholder="Min 8 characters"
-              bind:value={newPassword} autocomplete="new-password"/>
+            <input id="new-pw" class="field-input" type="password" placeholder="Min 8 characters" bind:value={newPassword} autocomplete="new-password"/>
           </div>
           <div class="field">
             <label class="field-label" for="confirm-pw">Confirm new password</label>
-            <input id="confirm-pw" class="field-input" type="password" placeholder="••••••••"
-              bind:value={confirmPassword} autocomplete="new-password"/>
+            <input id="confirm-pw" class="field-input" type="password" placeholder="••••••••" bind:value={confirmPassword} autocomplete="new-password"/>
           </div>
           <button class="save-btn" on:click={changePassword} disabled={passwordLoading}>
             {passwordLoading ? 'Saving…' : 'Update password'}
@@ -581,7 +607,12 @@
             <p class="page-sub">Windows · {selectedMachine.hostname} · {selectedMachine.id}</p>
           {/if}
         </div>
-        <input class="search" type="text" placeholder="Search username or SID…" bind:value={search}/>
+        <div class="topbar-right">
+          <input class="search" type="text" placeholder="Search username or SID…" bind:value={search}/>
+          {#if isAdmin && selectedMachine}
+            <button class="create-account-btn" on:click={openCreateModal}>+ New account</button>
+          {/if}
+        </div>
       </header>
 
       <div class="stats-row">
@@ -602,15 +633,9 @@
       {#if loading}
         <div class="state-box"><div class="spinner"></div><p>Loading…</p></div>
       {:else if error}
-        <div class="state-box error">
-          <p class="error-title">Could not load accounts</p>
-          <p class="error-detail">{error}</p>
-        </div>
+        <div class="state-box error"><p class="error-title">Could not load accounts</p><p class="error-detail">{error}</p></div>
       {:else if machines.length === 0}
-        <div class="state-box">
-          <p class="empty-title">No machines yet</p>
-          <p class="empty-sub">Run the agent on a machine to get started.</p>
-        </div>
+        <div class="state-box"><p class="empty-title">No machines yet</p><p class="empty-sub">Run the agent on a machine to get started.</p></div>
       {:else if filtered.length === 0}
         <div class="state-box"><p>No accounts match your search.</p></div>
       {:else}
@@ -627,20 +652,8 @@
               {#each filtered as account}
                 <tr>
                   <td class="td-username">{account.username}</td>
-                  <td>
-                    {#if account.enabled}
-                      <span class="badge badge-green">Enabled</span>
-                    {:else}
-                      <span class="badge badge-gray">Disabled</span>
-                    {/if}
-                  </td>
-                  <td>
-                    {#if account.is_admin}
-                      <span class="badge badge-amber">Admin</span>
-                    {:else}
-                      <span class="badge badge-ghost">User</span>
-                    {/if}
-                  </td>
+                  <td>{#if account.enabled}<span class="badge badge-green">Enabled</span>{:else}<span class="badge badge-gray">Disabled</span>{/if}</td>
+                  <td>{#if account.is_admin}<span class="badge badge-amber">Admin</span>{:else}<span class="badge badge-ghost">User</span>{/if}</td>
                   <td class="td-muted">{formatDate(account.last_logon)}</td>
                   <td class="td-sid">{account.sid || '—'}</td>
                   <td class="td-muted">{account.description || '—'}</td>
@@ -649,19 +662,16 @@
                       {#if account.username === currentUser}
                         <span class="action-self">—</span>
                       {:else if actionStatus[account.username] === 'pending'}
-                        <span class="action-pending">
-                          <span class="mini-spinner"></span> Pending…
-                        </span>
-                      {:else if account.enabled}
-                        <button class="action-btn action-disable"
-                          on:click={() => triggerAction('disable_account', account.username)}>
-                          Disable
-                        </button>
+                        <span class="action-pending"><span class="mini-spinner"></span> Pending…</span>
                       {:else}
-                        <button class="action-btn action-enable"
-                          on:click={() => triggerAction('enable_account', account.username)}>
-                          Enable
-                        </button>
+                        <div class="action-group">
+                          {#if account.enabled}
+                            <button class="action-btn action-disable" on:click={() => triggerAction('disable_account', account.username)}>Disable</button>
+                          {:else}
+                            <button class="action-btn action-enable" on:click={() => triggerAction('enable_account', account.username)}>Enable</button>
+                          {/if}
+                          <button class="action-btn action-delete" on:click={() => openDeleteModal(account)}>Delete</button>
+                        </div>
                       {/if}
                     </td>
                   {/if}
@@ -674,6 +684,58 @@
     {/if}
   </main>
 </div>
+
+<!-- ── Create account modal ── -->
+{#if showCreateModal}
+  <div class="modal-overlay" on:click|self={() => showCreateModal = false}>
+    <div class="modal">
+      <h2 class="modal-title">Create account</h2>
+      <p class="modal-sub">On {selectedMachine?.hostname}</p>
+
+      {#if createError}<div class="pw-error">{createError}</div>{/if}
+
+      <div class="field">
+        <label class="field-label" for="c-username">Username</label>
+        <input id="c-username" class="field-input" type="text" placeholder="newuser" bind:value={createUsername}/>
+      </div>
+      <div class="field">
+        <label class="field-label" for="c-password">Password</label>
+        <input id="c-password" class="field-input" type="password" placeholder="Min 8 characters" bind:value={createPassword}/>
+      </div>
+      <label class="checkbox-row">
+        <input type="checkbox" bind:checked={createIsAdmin}/>
+        <span>Add to Administrators group</span>
+      </label>
+
+      <div class="modal-actions">
+        <button class="modal-cancel" on:click={() => showCreateModal = false}>Cancel</button>
+        <button class="save-btn" on:click={submitCreateAccount} disabled={createLoading}>
+          {createLoading ? 'Creating…' : 'Create account'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ── Delete account modal ── -->
+{#if showDeleteModal && deleteTargetAccount}
+  <div class="modal-overlay" on:click|self={() => showDeleteModal = false}>
+    <div class="modal">
+      <h2 class="modal-title">Delete account</h2>
+      <p class="modal-sub" style="margin-bottom: 16px">
+        Are you sure you want to delete <strong style="color:#e2e4e9">{deleteTargetAccount.username}</strong> from {selectedMachine?.hostname}?
+        This cannot be undone.
+      </p>
+      <div class="modal-actions">
+        <button class="modal-cancel" on:click={() => showDeleteModal = false}>Cancel</button>
+        <button class="action-btn action-disable" style="padding: 8px 18px; font-size: 13px"
+          on:click={submitDeleteAccount} disabled={deleteLoading}>
+          {deleteLoading ? 'Deleting…' : 'Delete account'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 {/if}
 
 <style>
@@ -738,15 +800,18 @@
 
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; padding: 32px 36px; }
   .topbar { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 28px; gap: 16px; }
+  .topbar-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
   .page-title { font-size: 22px; font-weight: 600; color: #f0f1f3; letter-spacing: -0.01em; }
   .page-sub { font-size: 12px; color: #4a4f5e; margin-top: 3px; font-family: 'JetBrains Mono', monospace; }
-  .search { background: #111318; border: 1px solid #1e2028; border-radius: 8px; color: #d0d3e0; font-size: 13px; padding: 8px 14px; width: 260px; outline: none; transition: border-color 0.15s; flex-shrink: 0; }
+  .search { background: #111318; border: 1px solid #1e2028; border-radius: 8px; color: #d0d3e0; font-size: 13px; padding: 8px 14px; width: 240px; outline: none; transition: border-color 0.15s; }
   .search:focus { border-color: #6c8fff55; }
   .search::placeholder { color: #3a3f52; }
+  .create-account-btn { background: #6c8fff; color: #fff; border: none; border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: background 0.15s; }
+  .create-account-btn:hover { background: #5a7aee; }
 
   .settings-card { background: #111318; border: 1px solid #1e2028; border-radius: 10px; padding: 28px 32px; max-width: 680px; }
   .settings-section-title { font-size: 16px; font-weight: 600; color: #f0f1f3; margin-bottom: 6px; }
-  .settings-section-sub { font-size: 13px; color: #4a4f5e; margin-bottom: 20px; display: flex; align-items: center; gap: 6px; }
+  .settings-section-sub { font-size: 13px; color: #4a4f5e; margin-bottom: 20px; display: flex; align-items: center; }
   .settings-section-sub strong { color: #8a8fa8; }
   .settings-fields { display: flex; flex-direction: column; gap: 14px; }
   .form-row { display: flex; gap: 12px; align-items: flex-end; }
@@ -781,11 +846,14 @@
   .td-actions { white-space: nowrap; }
   .td-result { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+  .action-group { display: flex; gap: 6px; }
   .action-btn { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 5px; border: none; cursor: pointer; letter-spacing: 0.03em; }
   .action-disable { background: #2a1010; color: #e55; border: 1px solid #5a2020; }
   .action-disable:hover { background: #3a1515; }
   .action-enable { background: #0d2e1f; color: #3ecf8e; border: 1px solid #1a5a3a; }
   .action-enable:hover { background: #0f3824; }
+  .action-delete { background: #1a1010; color: #a33; border: 1px solid #3a1515; }
+  .action-delete:hover { background: #2a1515; color: #e55; border-color: #5a2020; }
   .action-pending { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: #4a4f5e; }
   .action-self { color: #2a2f3e; font-size: 13px; }
 
@@ -797,6 +865,31 @@
   .badge-amber  { background: #2e1f08; color: #f5a623; }
   .badge-red    { background: #2a1010; color: #e55; }
   .badge-ghost  { background: transparent; color: #3a3f52; border: 1px solid #1e2028; }
+
+  /* Modal */
+  .modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .modal {
+    background: #111318;
+    border: 1px solid #1e2028;
+    border-radius: 14px;
+    padding: 32px;
+    width: 420px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .modal-title { font-size: 18px; font-weight: 600; color: #f0f1f3; }
+  .modal-sub { font-size: 13px; color: #4a4f5e; margin-top: -8px; }
+  .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 4px; }
+  .modal-cancel { background: none; border: 1px solid #1e2028; border-radius: 8px; color: #6a7090; font-size: 13px; padding: 8px 16px; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+  .modal-cancel:hover { border-color: #2a2f3e; color: #d0d3e0; }
+  .checkbox-row { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #8a8fa8; cursor: pointer; }
+  .checkbox-row input { width: 15px; height: 15px; cursor: pointer; accent-color: #6c8fff; }
 
   .state-box { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: #4a4f5e; padding: 80px 0; }
   .state-box.error { color: #e55; }

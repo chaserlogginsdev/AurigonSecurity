@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
-	"io"
 )
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -37,22 +37,24 @@ type InventoryRequest struct {
 }
 
 type ActionRow struct {
-	ID          int    `json:"id"`
-	MachineID   string `json:"machine_id"`
-	Hostname    string `json:"hostname"`
-	Type        string `json:"type"`
-	Username    string `json:"username"`
-	CreatedBy   string `json:"created_by"`
-	Status      string `json:"status"`
-	CreatedAt   string `json:"created_at"`
-	ExecutedAt  string `json:"executed_at"`
-	Result      string `json:"result"`
+	ID         int               `json:"id"`
+	MachineID  string            `json:"machine_id"`
+	Hostname   string            `json:"hostname"`
+	Type       string            `json:"type"`
+	Username   string            `json:"username"`
+	Params     map[string]string `json:"params"`
+	CreatedBy  string            `json:"created_by"`
+	Status     string            `json:"status"`
+	CreatedAt  string            `json:"created_at"`
+	ExecutedAt string            `json:"executed_at"`
+	Result     string            `json:"result"`
 }
 
 type CreateActionRequest struct {
-	MachineID string `json:"machine_id"`
-	Type      string `json:"type"`
-	Username  string `json:"username"`
+	MachineID string            `json:"machine_id"`
+	Type      string            `json:"type"`
+	Username  string            `json:"username"`
+	Params    map[string]string `json:"params"`
 }
 
 type ActionResultRequest struct {
@@ -88,12 +90,10 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// agentAuthMiddleware verifies the shared agent API key
 func agentAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		expectedKey := os.Getenv("AURIGON_AGENT_KEY")
 		if expectedKey == "" {
-			// No key set — warn but allow (dev mode)
 			next(w, r)
 			return
 		}
@@ -164,7 +164,8 @@ func agentActionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(`
-		SELECT id, machine_id, '', type, username, created_by, status, created_at,
+		SELECT id, machine_id, '', type, username, COALESCE(params, '{}'),
+			created_by, status, created_at,
 			COALESCE(executed_at, ''), COALESCE(result, '')
 		FROM actions WHERE machine_id = ? AND status = 'pending'
 		ORDER BY created_at ASC
@@ -178,8 +179,10 @@ func agentActionsHandler(w http.ResponseWriter, r *http.Request) {
 	actions := []ActionRow{}
 	for rows.Next() {
 		var a ActionRow
+		var paramsJSON string
 		rows.Scan(&a.ID, &a.MachineID, &a.Hostname, &a.Type, &a.Username,
-			&a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
+			&paramsJSON, &a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
+		json.Unmarshal([]byte(paramsJSON), &a.Params)
 		actions = append(actions, a)
 	}
 	json.NewEncoder(w).Encode(actions)
@@ -257,17 +260,12 @@ func accountsHandler(w http.ResponseWriter, r *http.Request) {
 
 func createActionHandler(w http.ResponseWriter, r *http.Request) {
 	// Only admins can create actions
-requestingUser := getUsernameFromToken(r)
-var role string
-db.QueryRow(`SELECT role FROM users WHERE username = ?`, requestingUser).Scan(&role)
-if role != "admin" {
-    http.Error(w, "forbidden — admin role required", http.StatusForbidden)
-    return
-}
-	// Get the dashboard user who is creating this action
-	createdBy := getUsernameFromToken(r)
-	if createdBy == "" {
-		createdBy = "unknown"
+	requestingUser := getUsernameFromToken(r)
+	var role string
+	db.QueryRow(`SELECT role FROM users WHERE username = ?`, requestingUser).Scan(&role)
+	if role != "admin" {
+		http.Error(w, "forbidden — admin role required", http.StatusForbidden)
+		return
 	}
 
 	var req CreateActionRequest
@@ -279,16 +277,32 @@ if role != "admin" {
 	validTypes := map[string]bool{
 		"disable_account": true,
 		"enable_account":  true,
+		"delete_account":  true,
+		"create_account":  true,
 	}
 	if !validTypes[req.Type] {
 		http.Error(w, "invalid action type", http.StatusBadRequest)
 		return
 	}
 
+	// Validate create_account params
+	if req.Type == "create_account" {
+		if req.Params == nil || req.Params["password"] == "" {
+			http.Error(w, "create_account requires a password param", http.StatusBadRequest)
+			return
+		}
+		if len(req.Params["password"]) < 8 {
+			http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+			return
+		}
+	}
+
+	paramsJSON, _ := json.Marshal(req.Params)
+
 	result, err := db.Exec(`
-		INSERT INTO actions (machine_id, type, username, created_by, status)
-		VALUES (?, ?, ?, ?, 'pending')
-	`, req.MachineID, req.Type, req.Username, createdBy)
+		INSERT INTO actions (machine_id, type, username, params, created_by, status)
+		VALUES (?, ?, ?, ?, ?, 'pending')
+	`, req.MachineID, req.Type, req.Username, string(paramsJSON), requestingUser)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -296,7 +310,7 @@ if role != "admin" {
 
 	id, _ := result.LastInsertId()
 	log.Printf("Action queued: %s %s on %s by %s (id: %d)\n",
-		req.Type, req.Username, req.MachineID, createdBy, id)
+		req.Type, req.Username, req.MachineID, requestingUser, id)
 	json.NewEncoder(w).Encode(map[string]int64{"action_id": id})
 }
 
@@ -308,7 +322,8 @@ func actionsStatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(`
-		SELECT id, machine_id, '', type, username, created_by, status, created_at,
+		SELECT id, machine_id, '', type, username, COALESCE(params, '{}'),
+			created_by, status, created_at,
 			COALESCE(executed_at, ''), COALESCE(result, '')
 		FROM actions WHERE machine_id = ?
 		ORDER BY created_at DESC LIMIT 50
@@ -322,18 +337,20 @@ func actionsStatusHandler(w http.ResponseWriter, r *http.Request) {
 	actions := []ActionRow{}
 	for rows.Next() {
 		var a ActionRow
+		var paramsJSON string
 		rows.Scan(&a.ID, &a.MachineID, &a.Hostname, &a.Type, &a.Username,
-			&a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
+			&paramsJSON, &a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
+		json.Unmarshal([]byte(paramsJSON), &a.Params)
 		actions = append(actions, a)
 	}
 	json.NewEncoder(w).Encode(actions)
 }
 
-// Audit log — all actions across all machines with hostname joined
 func auditLogHandler(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query(`
-		SELECT a.id, a.machine_id, m.hostname, a.type, a.username, a.created_by,
-			a.status, a.created_at, COALESCE(a.executed_at, ''), COALESCE(a.result, '')
+		SELECT a.id, a.machine_id, m.hostname, a.type, a.username, COALESCE(a.params, '{}'),
+			a.created_by, a.status, a.created_at,
+			COALESCE(a.executed_at, ''), COALESCE(a.result, '')
 		FROM actions a
 		LEFT JOIN machines m ON a.machine_id = m.id
 		ORDER BY a.created_at DESC
@@ -348,8 +365,10 @@ func auditLogHandler(w http.ResponseWriter, r *http.Request) {
 	actions := []ActionRow{}
 	for rows.Next() {
 		var a ActionRow
+		var paramsJSON string
 		rows.Scan(&a.ID, &a.MachineID, &a.Hostname, &a.Type, &a.Username,
-			&a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
+			&paramsJSON, &a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
+		json.Unmarshal([]byte(paramsJSON), &a.Params)
 		actions = append(actions, a)
 	}
 	json.NewEncoder(w).Encode(actions)
@@ -358,7 +377,6 @@ func auditLogHandler(w http.ResponseWriter, r *http.Request) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
-	// Set up logging to both stdout and a log file
 	logFile, err := os.OpenFile("aurigon-backend.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Printf("Warning: could not open log file: %v\n", err)
@@ -387,7 +405,7 @@ func main() {
 	http.HandleFunc("/actions/create", corsMiddleware(authMiddleware(createActionHandler)))
 	http.HandleFunc("/actions/status", corsMiddleware(authMiddleware(actionsStatusHandler)))
 	http.HandleFunc("/audit", corsMiddleware(authMiddleware(auditLogHandler)))
-	
+
 	// User management (admin only)
 	http.HandleFunc("/users", corsMiddleware(authMiddleware(listUsersHandler)))
 	http.HandleFunc("/users/create", corsMiddleware(adminOnly(createUserHandler)))

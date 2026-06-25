@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"aurigon-agent/internal/accounts"
@@ -15,9 +16,10 @@ import (
 )
 
 type ActionRow struct {
-	ID       int    `json:"id"`
-	Type     string `json:"type"`
-	Username string `json:"username"`
+	ID       int               `json:"id"`
+	Type     string            `json:"type"`
+	Username string            `json:"username"`
+	Params   map[string]string `json:"params"`
 }
 
 type ActionResultRequest struct {
@@ -98,30 +100,65 @@ func reportResult(c *client.Client, actionID int, status, result string) {
 	}
 }
 
+func runCommand(name string, args ...string) (string, error) {
+	var out bytes.Buffer
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	return strings.TrimSpace(out.String()), err
+}
+
 func executeAction(c *client.Client, action ActionRow) {
 	log.Printf("Executing action %d: %s %s\n", action.ID, action.Type, action.Username)
 
-	var cmd *exec.Cmd
+	var (
+		output string
+		err    error
+	)
+
 	switch action.Type {
 	case "disable_account":
-		cmd = exec.Command("net", "user", action.Username, "/active:no")
+		output, err = runCommand("net", "user", action.Username, "/active:no")
+
 	case "enable_account":
-		cmd = exec.Command("net", "user", action.Username, "/active:yes")
+		output, err = runCommand("net", "user", action.Username, "/active:yes")
+
+	case "delete_account":
+		output, err = runCommand("net", "user", action.Username, "/delete")
+
+	case "create_account":
+		password := action.Params["password"]
+		isAdmin := action.Params["is_admin"]
+
+		if password == "" {
+			reportResult(c, action.ID, "failed", "no password provided for create_account")
+			return
+		}
+
+		// Create the account
+		output, err = runCommand("net", "user", action.Username, password, "/add")
+		if err != nil {
+			break
+		}
+
+		// Add to Administrators group if requested
+		if isAdmin == "true" {
+			adminOut, adminErr := runCommand("net", "localgroup", "Administrators", action.Username, "/add")
+			if adminErr != nil {
+				output += " | admin group error: " + adminOut
+			}
+		}
+
 	default:
 		log.Printf("Unknown action type: %s\n", action.Type)
 		reportResult(c, action.ID, "failed", "unknown action type: "+action.Type)
 		return
 	}
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	err := cmd.Run()
-
 	if err != nil {
-		msg := out.String()
-		log.Printf("Action %d failed: %v — %s\n", action.ID, err, msg)
-		reportResult(c, action.ID, "failed", msg)
+		log.Printf("Action %d failed: %v — %s\n", action.ID, err, output)
+		reportResult(c, action.ID, "failed", output)
 	} else {
 		log.Printf("Action %d succeeded: %s %s\n", action.ID, action.Type, action.Username)
 		reportResult(c, action.ID, "completed", "success")

@@ -18,12 +18,9 @@ func initDB() {
 		log.Fatalf("Failed to open database: %v", err)
 	}
 
-	// Enable WAL mode for better concurrent write handling
 	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
 		log.Fatalf("Failed to enable WAL mode: %v", err)
 	}
-
-	// Enforce foreign keys
 	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
 		log.Fatalf("Failed to enable foreign keys: %v", err)
 	}
@@ -63,6 +60,7 @@ func initDB() {
 		machine_id  TEXT NOT NULL,
 		type        TEXT NOT NULL,
 		username    TEXT NOT NULL,
+		params      TEXT NOT NULL DEFAULT '{}',
 		created_by  TEXT NOT NULL DEFAULT 'unknown',
 		status      TEXT NOT NULL DEFAULT 'pending',
 		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -76,10 +74,10 @@ func initDB() {
 		log.Fatalf("Failed to create schema: %v", err)
 	}
 
-	// Migrate: add created_by column if it doesn't exist yet
+	// Migrations for existing databases
 	db.Exec(`ALTER TABLE actions ADD COLUMN created_by TEXT NOT NULL DEFAULT 'unknown'`)
+	db.Exec(`ALTER TABLE actions ADD COLUMN params TEXT NOT NULL DEFAULT '{}'`)
 
-	// Seed default admin if no users exist
 	var count int
 	db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count)
 	if count == 0 {
