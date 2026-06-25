@@ -44,32 +44,25 @@
   // ── Auth ──────────────────────────────────────────────────────────────────────
 
   async function login() {
-    loginLoading = true; loginError = null;
-    try {
-      const res = await fetch(`${BASE}/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: loginUsername, password: loginPassword }),
-      });
-      if (!res.ok) throw new Error('Invalid username or password');
-      const data = await res.json();
-      token = data.token; currentUser = data.username;
-      sessionStorage.setItem('aurigon_token', token);
-      sessionStorage.setItem('aurigon_user', currentUser);
-      await loadMachines();
-    } catch (e) { loginError = e.message; }
-    finally { loginLoading = false; }
-  }
-
-  function logout() {
-    token = null; currentUser = null; machines = []; accounts = []; selectedMachine = null;
-    view = 'accounts'; auditLog = [];
-    sessionStorage.removeItem('aurigon_token'); sessionStorage.removeItem('aurigon_user');
-  }
-
-  function authHeaders() {
-    return { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
-  }
+  loginLoading = true; loginError = null;
+  try {
+    const res = await fetch(`${BASE}/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: loginUsername, password: loginPassword }),
+    });
+    if (!res.ok) {
+      const msg = await res.text();
+      throw new Error(msg.trim() || 'Invalid username or password');
+    }
+    const data = await res.json();
+    token = data.token; currentUser = data.username;
+    sessionStorage.setItem('aurigon_token', token);
+    sessionStorage.setItem('aurigon_user', currentUser);
+    await loadMachines();
+  } catch (e) { loginError = e.message; }
+  finally { loginLoading = false; }
+}
 
   // ── Change password ───────────────────────────────────────────────────────────
 
