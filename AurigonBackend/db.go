@@ -18,6 +18,16 @@ func initDB() {
 		log.Fatalf("Failed to open database: %v", err)
 	}
 
+	// Enable WAL mode for better concurrent write handling
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		log.Fatalf("Failed to enable WAL mode: %v", err)
+	}
+
+	// Enforce foreign keys
+	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		log.Fatalf("Failed to enable foreign keys: %v", err)
+	}
+
 	schema := `
 	CREATE TABLE IF NOT EXISTS machines (
 		id          TEXT PRIMARY KEY,

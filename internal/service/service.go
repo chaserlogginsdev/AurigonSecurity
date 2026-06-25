@@ -1,11 +1,13 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
-	"bytes"
 	"time"
 
 	"aurigon-agent/internal/accounts"
@@ -24,20 +26,35 @@ type ActionResultRequest struct {
 	Result   string `json:"result"`
 }
 
+func getBackendURL() string {
+	url := os.Getenv("AURIGON_BACKEND_URL")
+	if url == "" {
+		url = "http://localhost:8080"
+		log.Println("AURIGON_BACKEND_URL not set, using default: http://localhost:8080")
+	}
+	return url
+}
+
 func register(c *client.Client) (string, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
 	}
 
-	respBytes, err := c.Post("/register", map[string]string{"hostname": hostname})
+	respBytes, statusCode, err := c.Post("/register", map[string]string{"hostname": hostname})
 	if err != nil {
 		return "", err
+	}
+	if statusCode == http.StatusUnauthorized {
+		return "", fmt.Errorf("agent key rejected by backend — check AURIGON_AGENT_KEY")
+	}
+	if statusCode != http.StatusOK {
+		return "", fmt.Errorf("registration failed with status %d: %s", statusCode, string(respBytes))
 	}
 
 	var reg client.RegisterResponse
 	if err := json.Unmarshal(respBytes, &reg); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to parse registration response: %v", err)
 	}
 
 	c.SetToken(reg.Token)
@@ -47,18 +64,27 @@ func register(c *client.Client) (string, error) {
 
 func uploadInventory(c *client.Client, deviceID string, accs interface{}) error {
 	req := client.InventoryRequest{DeviceID: deviceID, Accounts: accs}
-	_, err := c.Post("/inventory", req)
-	return err
+	_, statusCode, err := c.Post("/inventory", req)
+	if err != nil {
+		return err
+	}
+	if statusCode != http.StatusOK {
+		return fmt.Errorf("inventory upload failed with status %d", statusCode)
+	}
+	return nil
 }
 
 func pollActions(c *client.Client, deviceID string) ([]ActionRow, error) {
-	respBytes, err := c.Get("/actions?device_id=" + deviceID)
+	respBytes, statusCode, err := c.Get("/actions?device_id=" + deviceID)
 	if err != nil {
 		return nil, err
 	}
+	if statusCode != http.StatusOK {
+		return nil, fmt.Errorf("polling actions failed with status %d", statusCode)
+	}
 	var actions []ActionRow
 	if err := json.Unmarshal(respBytes, &actions); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse actions response: %v", err)
 	}
 	return actions, nil
 }
@@ -66,7 +92,7 @@ func pollActions(c *client.Client, deviceID string) ([]ActionRow, error) {
 func reportResult(c *client.Client, actionID int, status, result string) {
 	req := ActionResultRequest{ActionID: actionID, Status: status, Result: result}
 	body, _ := json.Marshal(req)
-	_, err := c.PostRaw("/action-result", body)
+	_, _, err := c.PostRaw("/action-result", body)
 	if err != nil {
 		log.Printf("Failed to report action result: %v\n", err)
 	}
@@ -104,7 +130,12 @@ func executeAction(c *client.Client, action ActionRow) {
 
 func Run() error {
 	agentKey := os.Getenv("AURIGON_AGENT_KEY")
-	c := client.New("http://localhost:8080", agentKey)
+	if agentKey == "" {
+		log.Println("WARNING: AURIGON_AGENT_KEY not set — agent will be rejected if backend requires it")
+	}
+
+	backendURL := getBackendURL()
+	c := client.New(backendURL, agentKey)
 
 	deviceID, err := register(c)
 	if err != nil {
