@@ -256,6 +256,14 @@ func accountsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func createActionHandler(w http.ResponseWriter, r *http.Request) {
+	// Only admins can create actions
+requestingUser := getUsernameFromToken(r)
+var role string
+db.QueryRow(`SELECT role FROM users WHERE username = ?`, requestingUser).Scan(&role)
+if role != "admin" {
+    http.Error(w, "forbidden — admin role required", http.StatusForbidden)
+    return
+}
 	// Get the dashboard user who is creating this action
 	createdBy := getUsernameFromToken(r)
 	if createdBy == "" {
@@ -379,6 +387,11 @@ func main() {
 	http.HandleFunc("/actions/create", corsMiddleware(authMiddleware(createActionHandler)))
 	http.HandleFunc("/actions/status", corsMiddleware(authMiddleware(actionsStatusHandler)))
 	http.HandleFunc("/audit", corsMiddleware(authMiddleware(auditLogHandler)))
+	
+	// User management (admin only)
+	http.HandleFunc("/users", corsMiddleware(authMiddleware(listUsersHandler)))
+	http.HandleFunc("/users/create", corsMiddleware(adminOnly(createUserHandler)))
+	http.HandleFunc("/users/delete", corsMiddleware(adminOnly(deleteUserHandler)))
 
 	log.Println("Backend running on http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))

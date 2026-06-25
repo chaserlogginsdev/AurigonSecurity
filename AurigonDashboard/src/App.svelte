@@ -3,6 +3,7 @@
 
   let token = null;
   let currentUser = null;
+  let currentRole = null;
   let loginUsername = '';
   let loginPassword = '';
   let loginError = null;
@@ -17,7 +18,7 @@
   let filter = 'all';
   let actionStatus = {};
 
-  let view = 'accounts'; // 'accounts' | 'audit' | 'settings'
+  let view = 'accounts'; // 'accounts' | 'audit' | 'settings' | 'users'
 
   // Settings
   let currentPassword = '';
@@ -33,36 +34,71 @@
   let auditError = null;
   let auditSearch = '';
 
+  // User management
+  let users = [];
+  let usersLoading = false;
+  let usersError = null;
+  let newUsername = '';
+  let newUserPassword = '';
+  let newUserRole = 'viewer';
+  let userFormError = null;
+  let userFormSuccess = null;
+  let userFormLoading = false;
+
   const BASE = 'http://localhost:8080';
 
   onMount(() => {
     const saved = sessionStorage.getItem('aurigon_token');
     const savedUser = sessionStorage.getItem('aurigon_user');
-    if (saved) { token = saved; currentUser = savedUser; loadMachines(); }
+    const savedRole = sessionStorage.getItem('aurigon_role');
+    if (saved) {
+      token = saved;
+      currentUser = savedUser;
+      currentRole = savedRole;
+      loadMachines();
+    }
   });
 
   // ── Auth ──────────────────────────────────────────────────────────────────────
 
   async function login() {
-  loginLoading = true; loginError = null;
-  try {
-    const res = await fetch(`${BASE}/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: loginUsername, password: loginPassword }),
-    });
-    if (!res.ok) {
-      const msg = await res.text();
-      throw new Error(msg.trim() || 'Invalid username or password');
-    }
-    const data = await res.json();
-    token = data.token; currentUser = data.username;
-    sessionStorage.setItem('aurigon_token', token);
-    sessionStorage.setItem('aurigon_user', currentUser);
-    await loadMachines();
-  } catch (e) { loginError = e.message; }
-  finally { loginLoading = false; }
-}
+    loginLoading = true; loginError = null;
+    try {
+      const res = await fetch(`${BASE}/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: loginUsername, password: loginPassword }),
+      });
+      if (!res.ok) {
+        const msg = await res.text();
+        throw new Error(msg.trim() || 'Invalid username or password');
+      }
+      const data = await res.json();
+      token = data.token;
+      currentUser = data.username;
+      currentRole = data.role;
+      sessionStorage.setItem('aurigon_token', token);
+      sessionStorage.setItem('aurigon_user', currentUser);
+      sessionStorage.setItem('aurigon_role', currentRole);
+      await loadMachines();
+    } catch (e) { loginError = e.message; }
+    finally { loginLoading = false; }
+  }
+
+  function logout() {
+    token = null; currentUser = null; currentRole = null;
+    machines = []; accounts = []; selectedMachine = null;
+    view = 'accounts'; auditLog = []; users = [];
+    sessionStorage.removeItem('aurigon_token');
+    sessionStorage.removeItem('aurigon_user');
+    sessionStorage.removeItem('aurigon_role');
+  }
+
+  function authHeaders() {
+    return { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+  }
+
+  $: isAdmin = currentRole === 'admin';
 
   // ── Change password ───────────────────────────────────────────────────────────
 
@@ -87,6 +123,53 @@
     view = 'settings';
     passwordError = null; passwordSuccess = false;
     currentPassword = ''; newPassword = ''; confirmPassword = '';
+  }
+
+  // ── User management ───────────────────────────────────────────────────────────
+
+  async function openUsers() {
+    view = 'users';
+    usersLoading = true; usersError = null;
+    userFormError = null; userFormSuccess = null;
+    newUsername = ''; newUserPassword = ''; newUserRole = 'viewer';
+    try {
+      const res = await fetch(`${BASE}/users`, { headers: authHeaders() });
+      if (!res.ok) throw new Error(await res.text());
+      users = await res.json();
+    } catch (e) { usersError = e.message; }
+    finally { usersLoading = false; }
+  }
+
+  async function createUser() {
+    userFormError = null; userFormSuccess = null;
+    if (!newUsername) { userFormError = 'Username is required.'; return; }
+    if (newUserPassword.length < 8) { userFormError = 'Password must be at least 8 characters.'; return; }
+    userFormLoading = true;
+    try {
+      const res = await fetch(`${BASE}/users/create`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ username: newUsername, password: newUserPassword, role: newUserRole }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      userFormSuccess = `User "${newUsername}" created successfully.`;
+      newUsername = ''; newUserPassword = ''; newUserRole = 'viewer';
+      // Refresh user list
+      const listRes = await fetch(`${BASE}/users`, { headers: authHeaders() });
+      users = await listRes.json();
+    } catch (e) { userFormError = e.message; }
+    finally { userFormLoading = false; }
+  }
+
+  async function deleteUser(username) {
+    if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(`${BASE}/users/delete`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ username }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      users = users.filter(u => u.username !== username);
+    } catch (e) { usersError = e.message; }
   }
 
   // ── Audit log ─────────────────────────────────────────────────────────────────
@@ -213,10 +296,6 @@
     } catch { return '—'; }
   }
 
-  function actionLabel(type) {
-    return type === 'disable_account' ? 'Disabled' : type === 'enable_account' ? 'Enabled' : type;
-  }
-
   function isOnline(lastSeen) {
     if (!lastSeen) return false;
     return (Date.now() - new Date(lastSeen).getTime()) < 5 * 60 * 1000;
@@ -277,9 +356,11 @@
       <button class="nav-item-btn {view === 'audit' ? 'active' : ''}" on:click={openAuditLog}>
         <span class="nav-icon">◈</span> Audit log
       </button>
-      <a class="nav-item nav-disabled" href="#groups">
-        <span class="nav-icon">◉</span> Groups <span class="nav-soon">soon</span>
-      </a>
+      {#if isAdmin}
+        <button class="nav-item-btn {view === 'users' ? 'active' : ''}" on:click={openUsers}>
+          <span class="nav-icon">◉</span> Users
+        </button>
+      {/if}
     </nav>
 
     <div class="sidebar-footer">
@@ -287,7 +368,10 @@
         ⚙ Settings
       </button>
       <div class="user-row">
-        <span class="user-name">{currentUser}</span>
+        <div class="user-info">
+          <span class="user-name">{currentUser}</span>
+          <span class="role-badge {currentRole}">{currentRole}</span>
+        </div>
         <button class="logout-btn" on:click={logout}>Sign out</button>
       </div>
       <div class="machine-pill" style="margin-top:10px">
@@ -299,8 +383,93 @@
 
   <main class="main">
 
+    <!-- ── Users view ── -->
+    {#if view === 'users'}
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1 class="page-title">Users</h1>
+          <p class="page-sub">Manage dashboard access</p>
+        </div>
+      </header>
+
+      <!-- Create user form -->
+      <div class="settings-card" style="margin-bottom: 24px">
+        <h2 class="settings-section-title">Add user</h2>
+        {#if userFormSuccess}<div class="pw-success">{userFormSuccess}</div>{/if}
+        {#if userFormError}<div class="pw-error">{userFormError}</div>{/if}
+        <div class="settings-fields" style="margin-top: 16px">
+          <div class="form-row">
+            <div class="field" style="flex:1">
+              <label class="field-label" for="new-username">Username</label>
+              <input id="new-username" class="field-input" type="text" placeholder="johndoe"
+                bind:value={newUsername}/>
+            </div>
+            <div class="field" style="flex:1">
+              <label class="field-label" for="new-user-pw">Password</label>
+              <input id="new-user-pw" class="field-input" type="password" placeholder="Min 8 characters"
+                bind:value={newUserPassword}/>
+            </div>
+            <div class="field">
+              <label class="field-label" for="new-user-role">Role</label>
+              <select id="new-user-role" class="field-input field-select" bind:value={newUserRole}>
+                <option value="viewer">Viewer</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+          </div>
+          <button class="save-btn" on:click={createUser} disabled={userFormLoading}>
+            {userFormLoading ? 'Creating…' : 'Create user'}
+          </button>
+        </div>
+      </div>
+
+      <!-- Users table -->
+      {#if usersLoading}
+        <div class="state-box"><div class="spinner"></div><p>Loading…</p></div>
+      {:else if usersError}
+        <div class="state-box error"><p class="error-title">{usersError}</p></div>
+      {:else}
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr>
+            </thead>
+            <tbody>
+              {#each users as user}
+                <tr>
+                  <td class="td-username">
+                    {user.username}
+                    {#if user.username === currentUser}
+                      <span class="you-badge">you</span>
+                    {/if}
+                  </td>
+                  <td>
+                    {#if user.role === 'admin'}
+                      <span class="badge badge-amber">Admin</span>
+                    {:else}
+                      <span class="badge badge-ghost">Viewer</span>
+                    {/if}
+                  </td>
+                  <td class="td-muted">{formatDate(user.created_at)}</td>
+                  <td class="td-actions">
+                    {#if user.username !== currentUser}
+                      <button class="action-btn action-disable"
+                        on:click={() => deleteUser(user.username)}>
+                        Delete
+                      </button>
+                    {:else}
+                      <span class="action-self">—</span>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+
     <!-- ── Audit log view ── -->
-    {#if view === 'audit'}
+    {:else if view === 'audit'}
       <header class="topbar">
         <div class="topbar-left">
           <h1 class="page-title">Audit log</h1>
@@ -326,13 +495,8 @@
           <table class="table">
             <thead>
               <tr>
-                <th>When</th>
-                <th>Machine</th>
-                <th>Action</th>
-                <th>Account</th>
-                <th>By</th>
-                <th>Status</th>
-                <th>Result</th>
+                <th>When</th><th>Machine</th><th>Action</th>
+                <th>Account</th><th>By</th><th>Status</th><th>Result</th>
               </tr>
             </thead>
             <tbody>
@@ -381,7 +545,9 @@
 
       <div class="settings-card">
         <h2 class="settings-section-title">Change password</h2>
-        <p class="settings-section-sub">You are signed in as <strong>{currentUser}</strong>.</p>
+        <p class="settings-section-sub">You are signed in as <strong>{currentUser}</strong>
+          <span class="role-badge {currentRole}" style="margin-left:6px">{currentRole}</span>
+        </p>
         {#if passwordSuccess}<div class="pw-success">Password changed successfully.</div>{/if}
         {#if passwordError}<div class="pw-error">{passwordError}</div>{/if}
         <div class="settings-fields">
@@ -453,7 +619,8 @@
             <thead>
               <tr>
                 <th>Username</th><th>Status</th><th>Role</th>
-                <th>Last logon</th><th>SID</th><th>Description</th><th>Actions</th>
+                <th>Last logon</th><th>SID</th><th>Description</th>
+                {#if isAdmin}<th>Actions</th>{/if}
               </tr>
             </thead>
             <tbody>
@@ -477,25 +644,27 @@
                   <td class="td-muted">{formatDate(account.last_logon)}</td>
                   <td class="td-sid">{account.sid || '—'}</td>
                   <td class="td-muted">{account.description || '—'}</td>
-                  <td class="td-actions">
-                    {#if account.username === currentUser}
-                      <span class="action-self">—</span>
-                    {:else if actionStatus[account.username] === 'pending'}
-                      <span class="action-pending">
-                        <span class="mini-spinner"></span> Pending…
-                      </span>
-                    {:else if account.enabled}
-                      <button class="action-btn action-disable"
-                        on:click={() => triggerAction('disable_account', account.username)}>
-                        Disable
-                      </button>
-                    {:else}
-                      <button class="action-btn action-enable"
-                        on:click={() => triggerAction('enable_account', account.username)}>
-                        Enable
-                      </button>
-                    {/if}
-                  </td>
+                  {#if isAdmin}
+                    <td class="td-actions">
+                      {#if account.username === currentUser}
+                        <span class="action-self">—</span>
+                      {:else if actionStatus[account.username] === 'pending'}
+                        <span class="action-pending">
+                          <span class="mini-spinner"></span> Pending…
+                        </span>
+                      {:else if account.enabled}
+                        <button class="action-btn action-disable"
+                          on:click={() => triggerAction('disable_account', account.username)}>
+                          Disable
+                        </button>
+                      {:else}
+                        <button class="action-btn action-enable"
+                          on:click={() => triggerAction('enable_account', account.username)}>
+                          Enable
+                        </button>
+                      {/if}
+                    </td>
+                  {/if}
                 </tr>
               {/each}
             </tbody>
@@ -527,6 +696,7 @@
   .field-input { background: #0d0f12; border: 1px solid #1e2028; border-radius: 8px; color: #d0d3e0; font-size: 14px; padding: 10px 14px; outline: none; transition: border-color 0.15s; }
   .field-input:focus { border-color: #6c8fff55; }
   .field-input::placeholder { color: #2e3248; }
+  .field-select { cursor: pointer; }
   .login-btn { background: #6c8fff; color: #fff; border: none; border-radius: 8px; padding: 11px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.15s; }
   .login-btn:hover { background: #5a7aee; }
   .login-btn:disabled { opacity: 0.6; cursor: not-allowed; }
@@ -549,16 +719,17 @@
   .status-dot.offline { background: #3a3f52; }
   .machine-hostname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .no-machines { font-size: 12px; color: #3a3f52; padding: 4px 10px; }
-  .nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; color: #8a8fa8; text-decoration: none; font-size: 13px; margin-bottom: 2px; }
-  .nav-disabled { opacity: 0.4; pointer-events: none; }
   .nav-icon { font-size: 14px; }
-  .nav-soon { margin-left: auto; font-size: 10px; background: #1e2028; color: #4a4f5e; padding: 1px 6px; border-radius: 4px; }
   .sidebar-footer { padding: 16px 20px; margin-top: auto; border-top: 1px solid #1e2028; display: flex; flex-direction: column; gap: 10px; }
   .settings-btn { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border-radius: 6px; background: none; border: 1px solid #1e2028; color: #6a7090; font-size: 12px; cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s; text-align: left; }
   .settings-btn:hover { background: #1a1d25; color: #d0d3e0; border-color: #2a2f3e; }
   .settings-btn.active { background: #1a2240; color: #6c8fff; border-color: #6c8fff44; }
   .user-row { display: flex; align-items: center; justify-content: space-between; }
+  .user-info { display: flex; align-items: center; gap: 6px; }
   .user-name { font-size: 13px; color: #6a7090; }
+  .role-badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .role-badge.admin { background: #2e1f08; color: #f5a623; }
+  .role-badge.viewer { background: #1a1d25; color: #4a4f5e; }
   .logout-btn { background: none; border: 1px solid #1e2028; border-radius: 5px; color: #4a4f5e; font-size: 11px; padding: 3px 8px; cursor: pointer; transition: color 0.15s, border-color 0.15s; }
   .logout-btn:hover { color: #e55; border-color: #5a2020; }
   .machine-pill { display: flex; align-items: center; gap: 8px; background: #161920; border: 1px solid #1e2028; border-radius: 8px; padding: 8px 12px; }
@@ -573,11 +744,12 @@
   .search:focus { border-color: #6c8fff55; }
   .search::placeholder { color: #3a3f52; }
 
-  .settings-card { background: #111318; border: 1px solid #1e2028; border-radius: 10px; padding: 28px 32px; max-width: 480px; }
+  .settings-card { background: #111318; border: 1px solid #1e2028; border-radius: 10px; padding: 28px 32px; max-width: 680px; }
   .settings-section-title { font-size: 16px; font-weight: 600; color: #f0f1f3; margin-bottom: 6px; }
-  .settings-section-sub { font-size: 13px; color: #4a4f5e; margin-bottom: 20px; }
+  .settings-section-sub { font-size: 13px; color: #4a4f5e; margin-bottom: 20px; display: flex; align-items: center; gap: 6px; }
   .settings-section-sub strong { color: #8a8fa8; }
   .settings-fields { display: flex; flex-direction: column; gap: 14px; }
+  .form-row { display: flex; gap: 12px; align-items: flex-end; }
   .pw-success { background: #0d2e1f; border: 1px solid #1a5a3a; border-radius: 7px; padding: 10px 14px; font-size: 13px; color: #3ecf8e; margin-bottom: 6px; }
   .pw-error { background: #2a1010; border: 1px solid #5a2020; border-radius: 7px; padding: 10px 14px; font-size: 13px; color: #e55; margin-bottom: 6px; }
   .save-btn { background: #6c8fff; color: #fff; border: none; border-radius: 8px; padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer; align-self: flex-start; transition: background 0.15s; margin-top: 4px; }
@@ -616,6 +788,8 @@
   .action-enable:hover { background: #0f3824; }
   .action-pending { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: #4a4f5e; }
   .action-self { color: #2a2f3e; font-size: 13px; }
+
+  .you-badge { font-size: 10px; background: #1a2240; color: #6c8fff; padding: 1px 6px; border-radius: 4px; margin-left: 6px; font-weight: 600; }
 
   .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; letter-spacing: 0.03em; }
   .badge-green  { background: #0d2e1f; color: #3ecf8e; }
