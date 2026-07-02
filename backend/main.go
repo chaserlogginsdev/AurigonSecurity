@@ -5,13 +5,13 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 )
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Types ──────────────────────────────────────────────────────────────────
 
 type RegisterRequest struct {
 	Hostname string `json:"hostname"`
@@ -37,24 +37,22 @@ type InventoryRequest struct {
 }
 
 type ActionRow struct {
-	ID         int               `json:"id"`
-	MachineID  string            `json:"machine_id"`
-	Hostname   string            `json:"hostname"`
-	Type       string            `json:"type"`
-	Username   string            `json:"username"`
-	Params     map[string]string `json:"params"`
-	CreatedBy  string            `json:"created_by"`
-	Status     string            `json:"status"`
-	CreatedAt  string            `json:"created_at"`
-	ExecutedAt string            `json:"executed_at"`
-	Result     string            `json:"result"`
+	ID         int    `json:"id"`
+	MachineID  string `json:"machine_id"`
+	Hostname   string `json:"hostname"`
+	Type       string `json:"type"`
+	Username   string `json:"username"`
+	CreatedBy  string `json:"created_by"`
+	Status     string `json:"status"`
+	CreatedAt  string `json:"created_at"`
+	ExecutedAt string `json:"executed_at"`
+	Result     string `json:"result"`
 }
 
 type CreateActionRequest struct {
-	MachineID string            `json:"machine_id"`
-	Type      string            `json:"type"`
-	Username  string            `json:"username"`
-	Params    map[string]string `json:"params"`
+	MachineID string `json:"machine_id"`
+	Type      string `json:"type"`
+	Username  string `json:"username"`
 }
 
 type ActionResultRequest struct {
@@ -69,7 +67,7 @@ type MachineRow struct {
 	LastSeen string `json:"last_seen"`
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 func generateToken() string {
 	b := make([]byte, 16)
@@ -77,11 +75,17 @@ func generateToken() string {
 	return hex.EncodeToString(b)
 }
 
+// corsMiddleware allows requests from any origin when the dashboard is served
+// from the same backend. In production everything is on the same port so CORS
+// isn't needed, but we keep it permissive for dev mode (npm run dev on :5173).
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Agent-Key")
+		}
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -90,6 +94,7 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// agentAuthMiddleware verifies the shared agent API key on agent-facing routes.
 func agentAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		expectedKey := os.Getenv("AURIGON_AGENT_KEY")
@@ -97,9 +102,8 @@ func agentAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
-		key := r.Header.Get("X-Agent-Key")
-		if key != expectedKey {
-			log.Printf("Rejected agent request from %s — invalid key\n", r.RemoteAddr)
+		if r.Header.Get("X-Agent-Key") != expectedKey {
+			log.Printf("Rejected agent request from %s — invalid key", r.RemoteAddr)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -107,7 +111,33 @@ func agentAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// ── Agent handlers ────────────────────────────────────────────────────────────
+// spaHandler serves the compiled Svelte dashboard and falls back to index.html
+// for any path that isn't a real file, so client-side routing works correctly.
+type spaHandler struct {
+	fs http.Handler
+}
+
+func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Only serve the SPA for non-API paths
+	if strings.HasPrefix(r.URL.Path, "/api/") ||
+		r.URL.Path == "/login" ||
+		r.URL.Path == "/register" ||
+		r.URL.Path == "/inventory" ||
+		strings.HasPrefix(r.URL.Path, "/actions") ||
+		r.URL.Path == "/action-result" ||
+		r.URL.Path == "/machines" ||
+		r.URL.Path == "/accounts" ||
+		r.URL.Path == "/audit" ||
+		r.URL.Path == "/change-password" ||
+		strings.HasPrefix(r.URL.Path, "/users") ||
+		strings.HasPrefix(r.URL.Path, "/groups") {
+		http.NotFound(w, r)
+		return
+	}
+	h.fs.ServeHTTP(w, r)
+}
+
+// ── Agent handlers ─────────────────────────────────────────────────────────
 
 func registerHandler(w http.ResponseWriter, r *http.Request) {
 	var req RegisterRequest
@@ -164,8 +194,7 @@ func agentActionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(`
-		SELECT id, machine_id, '', type, username, COALESCE(params, '{}'),
-			created_by, status, created_at,
+		SELECT id, machine_id, '', type, username, created_by, status, created_at,
 			COALESCE(executed_at, ''), COALESCE(result, '')
 		FROM actions WHERE machine_id = ? AND status = 'pending'
 		ORDER BY created_at ASC
@@ -179,10 +208,8 @@ func agentActionsHandler(w http.ResponseWriter, r *http.Request) {
 	actions := []ActionRow{}
 	for rows.Next() {
 		var a ActionRow
-		var paramsJSON string
 		rows.Scan(&a.ID, &a.MachineID, &a.Hostname, &a.Type, &a.Username,
-			&paramsJSON, &a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
-		json.Unmarshal([]byte(paramsJSON), &a.Params)
+			&a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
 		actions = append(actions, a)
 	}
 	json.NewEncoder(w).Encode(actions)
@@ -204,7 +231,7 @@ func actionResultHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// ── Dashboard handlers ────────────────────────────────────────────────────────
+// ── Dashboard handlers ─────────────────────────────────────────────────────
 
 func machinesHandler(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query(`SELECT id, hostname, last_seen FROM machines ORDER BY last_seen DESC`)
@@ -259,12 +286,9 @@ func accountsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func createActionHandler(w http.ResponseWriter, r *http.Request) {
-	requestingUser := getUsernameFromToken(r)
-	var role string
-	db.QueryRow(`SELECT role FROM users WHERE username = ?`, requestingUser).Scan(&role)
-	if role != "admin" {
-		http.Error(w, "forbidden — admin role required", http.StatusForbidden)
-		return
+	createdBy := getUsernameFromToken(r)
+	if createdBy == "" {
+		createdBy = "unknown"
 	}
 
 	var req CreateActionRequest
@@ -274,44 +298,18 @@ func createActionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	validTypes := map[string]bool{
-		"disable_account":  true,
-		"enable_account":   true,
-		"delete_account":   true,
-		"create_account":   true,
-		"create_group":     true,
-		"delete_group":     true,
-		"add_to_group":     true,
-		"remove_from_group": true,
+		"disable_account": true,
+		"enable_account":  true,
 	}
 	if !validTypes[req.Type] {
 		http.Error(w, "invalid action type", http.StatusBadRequest)
 		return
 	}
 
-	if req.Type == "create_account" {
-		if req.Params == nil || req.Params["password"] == "" {
-			http.Error(w, "create_account requires a password param", http.StatusBadRequest)
-			return
-		}
-		if len(req.Params["password"]) < 8 {
-			http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
-			return
-		}
-	}
-
-	if (req.Type == "add_to_group" || req.Type == "remove_from_group") {
-		if req.Params == nil || req.Params["group"] == "" {
-			http.Error(w, "group name required", http.StatusBadRequest)
-			return
-		}
-	}
-
-	paramsJSON, _ := json.Marshal(req.Params)
-
 	result, err := db.Exec(`
-		INSERT INTO actions (machine_id, type, username, params, created_by, status)
-		VALUES (?, ?, ?, ?, ?, 'pending')
-	`, req.MachineID, req.Type, req.Username, string(paramsJSON), requestingUser)
+		INSERT INTO actions (machine_id, type, username, created_by, status)
+		VALUES (?, ?, ?, ?, 'pending')
+	`, req.MachineID, req.Type, req.Username, createdBy)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -319,7 +317,7 @@ func createActionHandler(w http.ResponseWriter, r *http.Request) {
 
 	id, _ := result.LastInsertId()
 	log.Printf("Action queued: %s %s on %s by %s (id: %d)\n",
-		req.Type, req.Username, req.MachineID, requestingUser, id)
+		req.Type, req.Username, req.MachineID, createdBy, id)
 	json.NewEncoder(w).Encode(map[string]int64{"action_id": id})
 }
 
@@ -331,8 +329,7 @@ func actionsStatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(`
-		SELECT id, machine_id, '', type, username, COALESCE(params, '{}'),
-			created_by, status, created_at,
+		SELECT id, machine_id, '', type, username, created_by, status, created_at,
 			COALESCE(executed_at, ''), COALESCE(result, '')
 		FROM actions WHERE machine_id = ?
 		ORDER BY created_at DESC LIMIT 50
@@ -346,10 +343,8 @@ func actionsStatusHandler(w http.ResponseWriter, r *http.Request) {
 	actions := []ActionRow{}
 	for rows.Next() {
 		var a ActionRow
-		var paramsJSON string
 		rows.Scan(&a.ID, &a.MachineID, &a.Hostname, &a.Type, &a.Username,
-			&paramsJSON, &a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
-		json.Unmarshal([]byte(paramsJSON), &a.Params)
+			&a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
 		actions = append(actions, a)
 	}
 	json.NewEncoder(w).Encode(actions)
@@ -357,9 +352,8 @@ func actionsStatusHandler(w http.ResponseWriter, r *http.Request) {
 
 func auditLogHandler(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query(`
-		SELECT a.id, a.machine_id, m.hostname, a.type, a.username, COALESCE(a.params, '{}'),
-			a.created_by, a.status, a.created_at,
-			COALESCE(a.executed_at, ''), COALESCE(a.result, '')
+		SELECT a.id, a.machine_id, m.hostname, a.type, a.username, a.created_by,
+			a.status, a.created_at, COALESCE(a.executed_at, ''), COALESCE(a.result, '')
 		FROM actions a
 		LEFT JOIN machines m ON a.machine_id = m.id
 		ORDER BY a.created_at DESC
@@ -374,54 +368,58 @@ func auditLogHandler(w http.ResponseWriter, r *http.Request) {
 	actions := []ActionRow{}
 	for rows.Next() {
 		var a ActionRow
-		var paramsJSON string
 		rows.Scan(&a.ID, &a.MachineID, &a.Hostname, &a.Type, &a.Username,
-			&paramsJSON, &a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
-		json.Unmarshal([]byte(paramsJSON), &a.Params)
+			&a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
 		actions = append(actions, a)
 	}
 	json.NewEncoder(w).Encode(actions)
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+// ── Main ───────────────────────────────────────────────────────────────────
 
 func main() {
-	logFile, err := os.OpenFile("aurigon-backend.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Printf("Warning: could not open log file: %v\n", err)
-	} else {
-		defer logFile.Close()
-		log.SetOutput(io.MultiWriter(os.Stdout, logFile))
-	}
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-
 	initDB()
 	initJWT()
 
-	// Agent endpoints (no JWT)
-	http.HandleFunc("/register", corsMiddleware(agentAuthMiddleware(registerHandler)))
-	http.HandleFunc("/inventory", corsMiddleware(agentAuthMiddleware(inventoryHandler)))
-	http.HandleFunc("/groups/inventory", corsMiddleware(agentAuthMiddleware(groupInventoryHandler)))
+	// Agent endpoints — protected by shared key, no JWT
+	http.HandleFunc("/register",     corsMiddleware(agentAuthMiddleware(registerHandler)))
+	http.HandleFunc("/inventory",    corsMiddleware(agentAuthMiddleware(inventoryHandler)))
+	http.HandleFunc("/action-result",corsMiddleware(agentAuthMiddleware(actionResultHandler)))
+
+	// /actions is used by both agent (GET) and dashboard (POST /actions/create, GET /actions/status)
 	http.HandleFunc("/actions", corsMiddleware(agentAuthMiddleware(agentActionsHandler)))
-	http.HandleFunc("/action-result", corsMiddleware(agentAuthMiddleware(actionResultHandler)))
 
 	// Auth
-	http.HandleFunc("/login", corsMiddleware(loginHandler))
+	http.HandleFunc("/login",           corsMiddleware(loginHandler))
 	http.HandleFunc("/change-password", corsMiddleware(authMiddleware(changePasswordHandler)))
 
-	// Dashboard endpoints (JWT protected)
-	http.HandleFunc("/machines", corsMiddleware(authMiddleware(machinesHandler)))
-	http.HandleFunc("/accounts", corsMiddleware(authMiddleware(accountsHandler)))
-	http.HandleFunc("/groups", corsMiddleware(authMiddleware(groupsHandler)))
-	http.HandleFunc("/actions/create", corsMiddleware(authMiddleware(createActionHandler)))
-	http.HandleFunc("/actions/status", corsMiddleware(authMiddleware(actionsStatusHandler)))
-	http.HandleFunc("/audit", corsMiddleware(authMiddleware(auditLogHandler)))
+	// Dashboard API endpoints — JWT protected
+	http.HandleFunc("/machines",        corsMiddleware(authMiddleware(machinesHandler)))
+	http.HandleFunc("/accounts",        corsMiddleware(authMiddleware(accountsHandler)))
+	http.HandleFunc("/actions/create",  corsMiddleware(authMiddleware(createActionHandler)))
+	http.HandleFunc("/actions/status",  corsMiddleware(authMiddleware(actionsStatusHandler)))
+	http.HandleFunc("/audit",           corsMiddleware(authMiddleware(auditLogHandler)))
 
-	// User management (admin only)
-	http.HandleFunc("/users", corsMiddleware(authMiddleware(listUsersHandler)))
-	http.HandleFunc("/users/create", corsMiddleware(adminOnly(createUserHandler)))
-	http.HandleFunc("/users/delete", corsMiddleware(adminOnly(deleteUserHandler)))
+	// Serve compiled Svelte dashboard from dist/
+	// Falls back to index.html so client-side routing works
+	distDir := "./dist"
+	if _, err := os.Stat(distDir); err == nil {
+		fs := http.FileServer(http.Dir(distDir))
+		http.Handle("/assets/", fs)
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			// Serve index.html for all non-asset, non-API paths (SPA routing)
+			http.ServeFile(w, r, distDir+"/index.html")
+		})
+		log.Println("Serving dashboard from ./dist")
+	} else {
+		log.Println("No ./dist folder found — dashboard not available. Run 'npm run build' in dashboard/")
+	}
 
-	log.Println("Backend running on http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	port := os.Getenv("AURIGON_PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("Aurigon Security backend running on http://localhost:%s\n", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }

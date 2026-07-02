@@ -72,7 +72,7 @@
   let showDeleteGroupModal = false;
   let deleteTargetGroup = null;
 
-  const BASE = 'http://localhost:8080';
+  const BASE = '';
 
   onMount(() => {
     const saved = sessionStorage.getItem('aurigon_token');
