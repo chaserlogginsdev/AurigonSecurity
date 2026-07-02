@@ -1,15 +1,15 @@
 # Binaries
-aurigon-agent.exe
-AurigonBackend/aurigon-backend.exe
-
-# Database
-AurigonBackend/aurigon.db
-
-# Frontend dependencies
-AurigonDashboard/node_modules/
-
-# Go build cache
-*.test
+*.exe
 *.log
 
-AurigonBackend/*.log
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Node
+node_modules/
+dist/
+
+# Go
+vendor/

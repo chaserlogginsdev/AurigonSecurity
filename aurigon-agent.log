@@ -1,50 +1,32 @@
-2026/06/24 22:55:37 Logging to C:\Users\chase\AurigonSecurity\aurigon-agent.log
-2026/06/24 22:55:37 service.go:33: AURIGON_BACKEND_URL not set, using default: http://localhost:8080
-2026/06/24 22:55:37 service.go:61: Registered as Chase-HP (device: 77fdb54158ca)
-2026/06/24 22:55:39 service.go:150: Found 7 accounts — uploading...
-2026/06/24 22:55:39 service.go:154: Inventory uploaded successfully
-2026/06/24 22:56:11 service.go:150: Found 7 accounts — uploading...
-2026/06/24 22:56:11 service.go:154: Inventory uploaded successfully
-2026/06/24 22:56:43 service.go:150: Found 7 accounts — uploading...
-2026/06/24 22:56:46 service.go:154: Inventory uploaded successfully
-2026/06/24 22:57:19 service.go:150: Found 7 accounts — uploading...
-2026/06/24 22:57:19 service.go:154: Inventory uploaded successfully
-2026/06/24 23:21:15 Logging to C:\Users\chase\AurigonSecurity\aurigon-agent.log
-2026/06/24 23:21:15 service.go:35: AURIGON_BACKEND_URL not set, using default: http://localhost:8080
-2026/06/24 23:21:15 service.go:63: Registered as Chase-HP (device: 77fdb54158ca)
-2026/06/24 23:21:17 service.go:187: Found 7 accounts — uploading...
-2026/06/24 23:21:27 service.go:189: Failed to upload inventory: Post "http://localhost:8080/inventory": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
-2026/06/24 23:21:27 service.go:199: Got 2 pending action(s)
-2026/06/24 23:21:27 service.go:113: Executing action 3: create_account test123
-2026/06/24 23:21:27 service.go:163: Action 3 succeeded: create_account test123
-2026/06/24 23:21:37 service.go:99: Failed to report action result: Post "http://localhost:8080/action-result": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
-2026/06/24 23:21:37 service.go:113: Executing action 4: create_account test123
-2026/06/24 23:21:37 service.go:160: Action 4 failed: exit status 2 — The account already exists.
-
-More help is available by typing NET HELPMSG 2224.
-2026/06/24 23:21:47 service.go:99: Failed to report action result: Post "http://localhost:8080/action-result": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
-2026/06/24 23:22:20 service.go:187: Found 8 accounts — uploading...
-2026/06/24 23:22:30 service.go:189: Failed to upload inventory: Post "http://localhost:8080/inventory": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
-2026/06/24 23:25:24 Logging to C:\Users\chase\AurigonSecurity\aurigon-agent.log
-2026/06/24 23:25:24 service.go:35: AURIGON_BACKEND_URL not set, using default: http://localhost:8080
-2026/06/24 23:25:24 service.go:63: Registered as Chase-HP (device: 77fdb54158ca)
-2026/06/24 23:25:26 service.go:187: Found 8 accounts — uploading...
-2026/06/24 23:25:26 service.go:191: Inventory uploaded successfully
-2026/06/24 23:25:26 service.go:199: Got 1 pending action(s)
-2026/06/24 23:25:26 service.go:113: Executing action 5: delete_account test123
-2026/06/24 23:25:26 service.go:163: Action 5 succeeded: delete_account test123
-2026/06/24 23:39:17 Logging to C:\Users\chase\AurigonSecurity\aurigon-agent.log
-2026/06/24 23:39:17 service.go:40: AURIGON_BACKEND_URL not set, using default: http://localhost:8080
-2026/06/24 23:39:17 service.go:68: Registered as Chase-HP (device: 77fdb54158ca)
-2026/06/24 23:39:19 service.go:227: Found 7 accounts — uploading...
-2026/06/24 23:39:19 service.go:231: Inventory uploaded successfully
-2026/06/24 23:39:20 service.go:240: Found 15 groups — uploading...
-2026/06/24 23:39:20 service.go:244: Groups uploaded successfully
-2026/06/24 23:39:53 service.go:227: Found 7 accounts — uploading...
-2026/06/24 23:39:53 service.go:231: Inventory uploaded successfully
-2026/06/24 23:39:54 service.go:240: Found 15 groups — uploading...
-2026/06/24 23:39:54 service.go:244: Groups uploaded successfully
-2026/06/24 23:40:26 service.go:227: Found 7 accounts — uploading...
-2026/06/24 23:40:26 service.go:231: Inventory uploaded successfully
-2026/06/24 23:40:27 service.go:240: Found 15 groups — uploading...
-2026/06/24 23:40:27 service.go:244: Groups uploaded successfully
+2026/07/01 20:25:36 Logging to C:\Users\chase\AurigonSecurity\aurigon-agent.log
+2026/07/01 20:25:36 main.go:28: agent failed: Post "http://localhost:8080/register": dial tcp [::1]:8080: connectex: No connection could be made because the target machine actively refused it.
+2026/07/01 20:25:41 Logging to C:\Users\chase\AurigonSecurity\aurigon-agent.log
+2026/07/01 20:25:41 main.go:28: agent failed: Post "http://localhost:8080/register": dial tcp [::1]:8080: connectex: No connection could be made because the target machine actively refused it.
+2026/07/01 20:25:46 Logging to C:\Users\chase\AurigonSecurity\aurigon-agent.log
+2026/07/01 20:25:46 main.go:28: agent failed: Post "http://localhost:8080/register": dial tcp [::1]:8080: connectex: No connection could be made because the target machine actively refused it.
+2026/07/01 20:25:54 Logging to C:\Users\chase\AurigonSecurity\aurigon-agent.log
+2026/07/01 20:25:54 main.go:28: agent failed: Post "http://localhost:8080/register": dial tcp [::1]:8080: connectex: No connection could be made because the target machine actively refused it.
+2026/07/01 20:26:10 Logging to C:\Users\chase\AurigonSecurity\aurigon-agent.log
+2026/07/01 20:26:10 service.go:68: Registered as Chase-HP (device: 7a92d1216bc4)
+2026/07/01 20:26:12 service.go:227: Found 7 accounts — uploading...
+2026/07/01 20:26:12 service.go:231: Inventory uploaded successfully
+2026/07/01 20:26:13 service.go:240: Found 15 groups — uploading...
+2026/07/01 20:26:13 service.go:244: Groups uploaded successfully
+2026/07/01 20:26:45 service.go:227: Found 7 accounts — uploading...
+2026/07/01 20:26:45 service.go:231: Inventory uploaded successfully
+2026/07/01 20:26:46 service.go:240: Found 15 groups — uploading...
+2026/07/01 20:26:46 service.go:244: Groups uploaded successfully
+2026/07/01 20:27:18 service.go:227: Found 7 accounts — uploading...
+2026/07/01 20:27:18 service.go:231: Inventory uploaded successfully
+2026/07/01 20:27:19 service.go:240: Found 15 groups — uploading...
+2026/07/01 20:27:19 service.go:244: Groups uploaded successfully
+2026/07/01 20:27:51 service.go:227: Found 7 accounts — uploading...
+2026/07/01 20:27:51 service.go:231: Inventory uploaded successfully
+2026/07/01 20:27:52 service.go:240: Found 15 groups — uploading...
+2026/07/01 20:27:53 service.go:244: Groups uploaded successfully
+2026/07/01 20:29:28 Logging to C:\Users\chase\AurigonSecurity\aurigon-agent.log
+2026/07/01 20:29:28 service.go:68: Registered as Chase-HP (device: 7a92d1216bc4)
+2026/07/01 20:29:31 service.go:227: Found 7 accounts — uploading...
+2026/07/01 20:29:31 service.go:231: Inventory uploaded successfully
+2026/07/01 20:29:32 service.go:240: Found 15 groups — uploading...
+2026/07/01 20:29:32 service.go:244: Groups uploaded successfully
