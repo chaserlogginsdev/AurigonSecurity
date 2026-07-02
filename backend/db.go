@@ -100,7 +100,7 @@ func initDB() {
 	if count == 0 {
 		password := os.Getenv("AURIGON_ADMIN_PASSWORD")
 		if password == "" {
-			password = "admin123"
+			log.Fatal("AURIGON_ADMIN_PASSWORD is not set. Cannot seed admin user with a default password. Set this environment variable and restart.")
 		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 		if err != nil {
