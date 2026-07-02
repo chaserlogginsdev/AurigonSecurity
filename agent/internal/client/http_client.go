@@ -9,21 +9,45 @@ import (
 )
 
 type Client struct {
-	BaseURL  string
-	Token    string
-	AgentKey string
-	http     *http.Client
+	BaseURL   string
+	Token     string
+	AgentKey  string
+	DeployKey string // AGT-... token, takes priority over AgentKey
+	http      *http.Client
 }
 
-func New(baseURL string, agentKey string) *Client {
+type RegisterResponse struct {
+	DeviceID string `json:"device_id"`
+	Token    string `json:"token"`
+}
+
+type InventoryRequest struct {
+	DeviceID string      `json:"device_id"`
+	Accounts interface{} `json:"accounts"`
+}
+
+func New(baseURL, agentKey, deployKey string) *Client {
 	return &Client{
-		BaseURL:  baseURL,
-		AgentKey: agentKey,
-		http:     &http.Client{Timeout: 10 * time.Second},
+		BaseURL:   baseURL,
+		AgentKey:  agentKey,
+		DeployKey: deployKey,
+		http:      &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
 func (c *Client) SetToken(token string) { c.Token = token }
+
+func (c *Client) addAuthHeaders(req *http.Request) {
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	// Deploy key takes priority over legacy agent key
+	if c.DeployKey != "" {
+		req.Header.Set("X-Deploy-Key", c.DeployKey)
+	} else if c.AgentKey != "" {
+		req.Header.Set("X-Agent-Key", c.AgentKey)
+	}
+}
 
 func (c *Client) Post(path string, body interface{}) ([]byte, int, error) {
 	jsonBody, err := json.Marshal(body)
@@ -39,12 +63,8 @@ func (c *Client) PostRaw(path string, body []byte) ([]byte, int, error) {
 		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-	}
-	if c.AgentKey != "" {
-		req.Header.Set("X-Agent-Key", c.AgentKey)
-	}
+	c.addAuthHeaders(req)
+
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, 0, err
@@ -59,12 +79,8 @@ func (c *Client) Get(path string) ([]byte, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-	}
-	if c.AgentKey != "" {
-		req.Header.Set("X-Agent-Key", c.AgentKey)
-	}
+	c.addAuthHeaders(req)
+
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, 0, err

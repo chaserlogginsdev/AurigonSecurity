@@ -75,16 +75,16 @@ func generateToken() string {
 	return hex.EncodeToString(b)
 }
 
-// corsMiddleware allows requests from any origin when the dashboard is served
-// from the same backend. In production everything is on the same port so CORS
-// isn't needed, but we keep it permissive for dev mode (npm run dev on :5173).
+// corsMiddleware allows requests from any origin.
+// In production the dashboard is served from the same port so CORS isn't
+// needed, but we keep it permissive for dev mode (npm run dev on :5173).
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Agent-Key")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Agent-Key, X-Deploy-Key")
 		}
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusNoContent)
@@ -94,47 +94,41 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// agentAuthMiddleware verifies the shared agent API key on agent-facing routes.
+// agentAuthMiddleware accepts either:
+//   - X-Deploy-Key header (new — tenant deploy key)
+//   - X-Agent-Key header  (legacy — raw shared secret)
 func agentAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		expectedKey := os.Getenv("AURIGON_AGENT_KEY")
-		if expectedKey == "" {
+		// Try deploy key first (new method)
+		deployKey := r.Header.Get("X-Deploy-Key")
+		if deployKey != "" {
+			_, err := validateDeployKey(deployKey)
+			if err != nil {
+				log.Printf("Rejected agent request from %s — invalid deploy key: %v", r.RemoteAddr, err)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 			next(w, r)
 			return
 		}
-		if r.Header.Get("X-Agent-Key") != expectedKey {
-			log.Printf("Rejected agent request from %s — invalid key", r.RemoteAddr)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+
+		// Fall back to legacy agent key
+		expectedKey := os.Getenv("AURIGON_AGENT_KEY")
+		if expectedKey != "" {
+			agentKey := r.Header.Get("X-Agent-Key")
+			if agentKey != expectedKey {
+				log.Printf("Rejected agent request from %s — invalid agent key", r.RemoteAddr)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next(w, r)
 			return
 		}
+
+		// No auth configured — warn but allow (dev mode only)
+		log.Println("WARNING: No agent auth configured. Set AURIGON_AGENT_KEY or use deploy keys.")
 		next(w, r)
 	}
-}
-
-// spaHandler serves the compiled Svelte dashboard and falls back to index.html
-// for any path that isn't a real file, so client-side routing works correctly.
-type spaHandler struct {
-	fs http.Handler
-}
-
-func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Only serve the SPA for non-API paths
-	if strings.HasPrefix(r.URL.Path, "/api/") ||
-		r.URL.Path == "/login" ||
-		r.URL.Path == "/register" ||
-		r.URL.Path == "/inventory" ||
-		strings.HasPrefix(r.URL.Path, "/actions") ||
-		r.URL.Path == "/action-result" ||
-		r.URL.Path == "/machines" ||
-		r.URL.Path == "/accounts" ||
-		r.URL.Path == "/audit" ||
-		r.URL.Path == "/change-password" ||
-		strings.HasPrefix(r.URL.Path, "/users") ||
-		strings.HasPrefix(r.URL.Path, "/groups") {
-		http.NotFound(w, r)
-		return
-	}
-	h.fs.ServeHTTP(w, r)
 }
 
 // ── Agent handlers ─────────────────────────────────────────────────────────
@@ -381,38 +375,53 @@ func main() {
 	initDB()
 	initJWT()
 
-	// Agent endpoints — protected by shared key, no JWT
-	http.HandleFunc("/register",     corsMiddleware(agentAuthMiddleware(registerHandler)))
-	http.HandleFunc("/inventory",    corsMiddleware(agentAuthMiddleware(inventoryHandler)))
-	http.HandleFunc("/action-result",corsMiddleware(agentAuthMiddleware(actionResultHandler)))
+	// ── Agent endpoints — accept deploy key or legacy agent key ───────────
+	http.HandleFunc("/register",      corsMiddleware(agentAuthMiddleware(registerHandler)))
+	http.HandleFunc("/inventory",     corsMiddleware(agentAuthMiddleware(inventoryHandler)))
+	http.HandleFunc("/action-result", corsMiddleware(agentAuthMiddleware(actionResultHandler)))
+	http.HandleFunc("/actions",       corsMiddleware(agentAuthMiddleware(agentActionsHandler)))
 
-	// /actions is used by both agent (GET) and dashboard (POST /actions/create, GET /actions/status)
-	http.HandleFunc("/actions", corsMiddleware(agentAuthMiddleware(agentActionsHandler)))
-
-	// Auth
+	// ── Auth ──────────────────────────────────────────────────────────────
 	http.HandleFunc("/login",           corsMiddleware(loginHandler))
 	http.HandleFunc("/change-password", corsMiddleware(authMiddleware(changePasswordHandler)))
 
-	// Dashboard API endpoints — JWT protected
-	http.HandleFunc("/machines",        corsMiddleware(authMiddleware(machinesHandler)))
-	http.HandleFunc("/accounts",        corsMiddleware(authMiddleware(accountsHandler)))
-	http.HandleFunc("/actions/create",  corsMiddleware(authMiddleware(createActionHandler)))
-	http.HandleFunc("/actions/status",  corsMiddleware(authMiddleware(actionsStatusHandler)))
-	http.HandleFunc("/audit",           corsMiddleware(authMiddleware(auditLogHandler)))
+	// ── Dashboard API — JWT protected ─────────────────────────────────────
+	http.HandleFunc("/machines",       corsMiddleware(authMiddleware(machinesHandler)))
+	http.HandleFunc("/accounts",       corsMiddleware(authMiddleware(accountsHandler)))
+	http.HandleFunc("/actions/create", corsMiddleware(authMiddleware(createActionHandler)))
+	http.HandleFunc("/actions/status", corsMiddleware(authMiddleware(actionsStatusHandler)))
+	http.HandleFunc("/audit",          corsMiddleware(authMiddleware(auditLogHandler)))
 
-	// Serve compiled Svelte dashboard from dist/
-	// Falls back to index.html so client-side routing works
+	// ── Users — admin only ────────────────────────────────────────────────
+	http.HandleFunc("/users",        corsMiddleware(authMiddleware(adminOnly(listUsersHandler))))
+	http.HandleFunc("/users/create", corsMiddleware(authMiddleware(adminOnly(createUserHandler))))
+	http.HandleFunc("/users/delete", corsMiddleware(authMiddleware(adminOnly(deleteUserHandler))))
+
+	// ── Groups ────────────────────────────────────────────────────────────
+	http.HandleFunc("/groups",           corsMiddleware(authMiddleware(groupsHandler)))
+	http.HandleFunc("/groups/inventory", corsMiddleware(agentAuthMiddleware(groupInventoryHandler)))
+
+	// ── Deploy keys — admin only ──────────────────────────────────────────
+	http.HandleFunc("/deploy-keys",          corsMiddleware(authMiddleware(adminOnly(listDeployKeysHandler))))
+	http.HandleFunc("/deploy-keys/generate", corsMiddleware(authMiddleware(adminOnly(generateDeployKeyHandler))))
+	http.HandleFunc("/deploy-keys/revoke",   corsMiddleware(authMiddleware(adminOnly(revokeDeployKeyHandler))))
+
+	// ── Serve compiled Svelte dashboard from dist/ ────────────────────────
 	distDir := "./dist"
 	if _, err := os.Stat(distDir); err == nil {
 		fs := http.FileServer(http.Dir(distDir))
 		http.Handle("/assets/", fs)
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			// Serve index.html for all non-asset, non-API paths (SPA routing)
+			// Don't serve index.html for API paths — let them 404 naturally
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				http.NotFound(w, r)
+				return
+			}
 			http.ServeFile(w, r, distDir+"/index.html")
 		})
 		log.Println("Serving dashboard from ./dist")
 	} else {
-		log.Println("No ./dist folder found — dashboard not available. Run 'npm run build' in dashboard/")
+		log.Println("No ./dist folder — dashboard not available. Run 'npm run build' in dashboard/")
 	}
 
 	port := os.Getenv("AURIGON_PORT")

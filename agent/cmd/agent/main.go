@@ -10,21 +10,19 @@ import (
 )
 
 func main() {
-	// Set up logging to both stdout and a log file
-	logDir := filepath.Dir(os.Args[0])
-	logPath := filepath.Join(logDir, "aurigon-agent.log")
+	exeDir := filepath.Dir(os.Args[0])
+	logPath := filepath.Join(exeDir, "aurigon-agent.log")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Printf("Warning: could not open log file %s: %v\n", logPath, err)
+		log.Printf("Warning: could not open log file: %v", err)
 	} else {
 		defer logFile.Close()
 		log.SetOutput(io.MultiWriter(os.Stdout, logFile))
-		log.Printf("Logging to %s\n", logPath)
 	}
-
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
-	if err := service.Run(); err != nil {
+	stop := make(chan struct{})
+	if err := service.RunWithStop(stop); err != nil {
 		log.Fatalf("agent failed: %v", err)
 	}
 }
