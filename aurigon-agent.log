@@ -474,3 +474,5 @@
 2026/07/01 21:29:27 service.go:48: Agent running. Polling every 30 seconds...
 2026/07/01 21:29:29 service.go:91: Uploaded 7 accounts
 2026/07/01 21:29:30 service.go:103: Uploaded 15 groups
+2026/07/01 21:29:59 service.go:91: Uploaded 7 accounts
+2026/07/01 21:30:00 service.go:103: Uploaded 15 groups
