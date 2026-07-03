@@ -23,7 +23,7 @@
 #define AppPublisher "Aurigon Security"
 #define AppURL       "https://aurigonsecurity.com"
 #define ServiceName  "AurigonBackend"
-#define InstallDir   "{pf}\AurigonSecurity"
+#define InstallDir   "{commonpf64}\AurigonSecurity"
 
 [Setup]
 AppId={{B7F3D2A1-9C4E-4B8F-A023-1D6E7F8A9B0C}
