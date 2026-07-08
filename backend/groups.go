@@ -29,13 +29,14 @@ type GroupInventoryRequest struct {
 
 // Agent posts group inventory here
 func groupInventoryHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
+
 	var req GroupInventoryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Delete existing groups for this machine and re-insert
 	db.Exec(`DELETE FROM groups WHERE machine_id = ?`, req.DeviceID)
 	db.Exec(`DELETE FROM group_members WHERE machine_id = ?`, req.DeviceID)
 
@@ -59,12 +60,14 @@ func groupInventoryHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	log.Printf("Groups updated: %s — %d groups\n", req.DeviceID, len(req.Groups))
+	log.Printf("Groups updated: %s — %d groups", req.DeviceID, len(req.Groups))
 	w.WriteHeader(http.StatusOK)
 }
 
 // Dashboard fetches groups for a machine
 func groupsHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
+
 	machineID := r.URL.Query().Get("machine_id")
 	if machineID == "" {
 		http.Error(w, "machine_id required", http.StatusBadRequest)
@@ -87,19 +90,18 @@ func groupsHandler(w http.ResponseWriter, r *http.Request) {
 		var g GroupRow
 		rows.Scan(&g.ID, &g.MachineID, &g.Name, &g.Description)
 
-		// Fetch members for this group
 		memberRows, err := db.Query(`
 			SELECT username FROM group_members
 			WHERE machine_id = ? AND group_id = ?
 			ORDER BY username ASC
 		`, machineID, g.ID)
 		if err == nil {
-			defer memberRows.Close()
 			for memberRows.Next() {
 				var username string
 				memberRows.Scan(&username)
 				g.Members = append(g.Members, username)
 			}
+			memberRows.Close()
 		}
 		if g.Members == nil {
 			g.Members = []string{}
@@ -107,5 +109,6 @@ func groupsHandler(w http.ResponseWriter, r *http.Request) {
 		groups = append(groups, g)
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(groups)
 }

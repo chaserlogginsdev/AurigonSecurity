@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"strings"
 	"time"
 
 	"aurigon-agent/internal/accounts"
@@ -30,6 +31,14 @@ type GroupInventoryRequest struct {
 	Groups   []accounts.LocalGroup `json:"groups"`
 }
 
+type MachineInfoRequest struct {
+	DeviceID       string   `json:"device_id"`
+	Domain         string   `json:"domain"`
+	IsDomainJoined bool     `json:"is_domain_joined"`
+	IPAddresses    []string `json:"ip_addresses"`
+	OSVersion      string   `json:"os_version"`
+}
+
 // RunWithStop is the main agent loop. Runs until stop channel is closed.
 func RunWithStop(stop <-chan struct{}) error {
 	backendURL, agentKey, deployKey, err := ReadConfig()
@@ -39,7 +48,6 @@ func RunWithStop(stop <-chan struct{}) error {
 
 	c := client.New(backendURL, agentKey, deployKey)
 
-	// Register — retry until success or stop signal
 	deviceID, err := registerWithRetry(c, stop)
 	if err != nil {
 		return err
@@ -50,7 +58,6 @@ func RunWithStop(stop <-chan struct{}) error {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	// Run immediately before first tick
 	runCycle(c, deviceID)
 
 	for {
@@ -80,10 +87,23 @@ func registerWithRetry(c *client.Client, stop <-chan struct{}) (string, error) {
 }
 
 func runCycle(c *client.Client, deviceID string) {
+	// Machine info (IP, domain, OS)
+	info, err := accounts.EnumerateMachineInfo()
+	if err != nil {
+		log.Printf("Machine info enumeration failed: %v", err)
+	} else {
+		if err := uploadMachineInfo(c, deviceID, info); err != nil {
+			log.Printf("Machine info upload failed: %v", err)
+		} else {
+			log.Printf("Machine info uploaded (IPs: %s, Domain: %s)",
+				strings.Join(info.IPAddresses, ", "), info.Domain)
+		}
+	}
+
 	// Accounts
 	accs, err := accounts.Enumerate()
 	if err != nil {
-		log.Printf("Enumeration failed: %v", err)
+		log.Printf("Account enumeration failed: %v", err)
 	} else {
 		if err := uploadInventory(c, deviceID, accs); err != nil {
 			log.Printf("Inventory upload failed: %v", err)
@@ -140,6 +160,24 @@ func register(c *client.Client) (string, error) {
 	return reg.DeviceID, nil
 }
 
+func uploadMachineInfo(c *client.Client, deviceID string, info *accounts.MachineInfo) error {
+	req := MachineInfoRequest{
+		DeviceID:       deviceID,
+		Domain:         info.Domain,
+		IsDomainJoined: info.IsDomainJoined,
+		IPAddresses:    info.IPAddresses,
+		OSVersion:      info.OSVersion,
+	}
+	_, statusCode, err := c.Post("/machine-info", req)
+	if err != nil {
+		return err
+	}
+	if statusCode != http.StatusOK {
+		return fmt.Errorf("machine info upload failed (status %d)", statusCode)
+	}
+	return nil
+}
+
 func uploadInventory(c *client.Client, deviceID string, accs interface{}) error {
 	req := client.InventoryRequest{DeviceID: deviceID, Accounts: accs}
 	_, statusCode, err := c.Post("/inventory", req)
@@ -192,16 +230,34 @@ func executeAction(c *client.Client, action ActionRow) {
 	switch action.Type {
 	case "disable_account":
 		err = runNetUser(action.Username, "/active:no")
+
 	case "enable_account":
 		err = runNetUser(action.Username, "/active:yes")
+
+	case "create_account":
+		password := action.Params["password"]
+		isAdmin := action.Params["is_admin"] == "true"
+		err = accounts.CreateAccount(action.Username, password, isAdmin)
+
+	case "delete_account":
+		err = accounts.DeleteAccount(action.Username)
+
+	case "set_admin":
+		err = accounts.SetAdminPrivilege(action.Username, true)
+
+	case "remove_admin":
+		err = accounts.SetAdminPrivilege(action.Username, false)
+
 	default:
 		reportResult(c, action.ID, "failed", fmt.Sprintf("unknown action type: %s", action.Type))
 		return
 	}
 
 	if err != nil {
+		log.Printf("Action %d failed: %v", action.ID, err)
 		reportResult(c, action.ID, "failed", err.Error())
 	} else {
+		log.Printf("Action %d completed successfully", action.ID)
 		reportResult(c, action.ID, "completed", "success")
 	}
 }

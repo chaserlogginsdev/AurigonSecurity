@@ -25,28 +25,10 @@ type DeleteUserRequest struct {
 	Username string `json:"username"`
 }
 
-// adminOnly middleware — only allows admin role through
-func adminOnly(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		username := getUsernameFromToken(r)
-		if username == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		var role string
-		err := db.QueryRow(`SELECT role FROM users WHERE username = ?`, username).Scan(&role)
-		if err != nil || role != "admin" {
-			http.Error(w, "forbidden — admin role required", http.StatusForbidden)
-			return
-		}
-
-		next(w, r)
-	}
-}
-
-// listUsersHandler returns all dashboard users (no password hashes)
+// listUsersHandler returns all dashboard users for the current tenant (no password hashes)
 func listUsersHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
+
 	rows, err := db.Query(`SELECT id, username, role, created_at FROM users ORDER BY created_at ASC`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -60,11 +42,14 @@ func listUsersHandler(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt)
 		users = append(users, u)
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(users)
 }
 
-// createUserHandler creates a new dashboard user
+// createUserHandler creates a new dashboard user in the current tenant
 func createUserHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
+
 	var req CreateUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -97,26 +82,26 @@ func createUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("User created: %s (%s)\n", req.Username, req.Role)
+	log.Printf("User created: %s (%s) in tenant %s", req.Username, req.Role, tenantIDFromCtx(r))
 	w.WriteHeader(http.StatusCreated)
 }
 
-// deleteUserHandler deletes a dashboard user
+// deleteUserHandler deletes a dashboard user in the current tenant
 func deleteUserHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
+
 	var req DeleteUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	// Prevent deleting yourself
-	requestingUser := getUsernameFromToken(r)
+	requestingUser := usernameFromCtx(r)
 	if req.Username == requestingUser {
 		http.Error(w, "cannot delete your own account", http.StatusBadRequest)
 		return
 	}
 
-	// Prevent deleting the last admin
 	var adminCount int
 	db.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'admin'`).Scan(&adminCount)
 	var targetRole string
@@ -138,6 +123,6 @@ func deleteUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("User deleted: %s\n", req.Username)
+	log.Printf("User deleted: %s in tenant %s", req.Username, tenantIDFromCtx(r))
 	w.WriteHeader(http.StatusOK)
 }

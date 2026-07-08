@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -10,24 +9,16 @@ import (
 	"time"
 )
 
-// ── Deploy key format ──────────────────────────────────────────────────────
-//
-// A deploy key is a base64url-encoded JSON payload prefixed with "AGT-":
-//
-//   AGT-eyJiYWNrZW5kdXJsIjoiaHR0cDovLzEwLjAuMC41OjgwODAiLCJrZXkiOiJzZWNyZXQifQ==
-//
-// The payload contains:
-//   { "backend_url": "http://10.0.0.5:8080", "key": "shared-agent-secret", "id": "abc123" }
-//
-// The agent decodes this on startup — no raw secrets ever visible to the customer.
-// ──────────────────────────────────────────────────────────────────────────
-
 const deployKeyPrefix = "AGT-"
 
+// DeployKeyPayload is embedded in the AGT- token.
+// It carries everything the agent needs to connect AND
+// enough info for the backend to route to the right tenant.
 type DeployKeyPayload struct {
-	ID         string `json:"id"`
+	ID       string `json:"id"`        // key ID (for DB lookup)
+	TenantID string `json:"tenant_id"` // which tenant this key belongs to
+	Key      string `json:"key"`       // the agent shared secret
 	BackendURL string `json:"backend_url"`
-	Key        string `json:"key"`
 }
 
 type DeployKeyRow struct {
@@ -53,11 +44,9 @@ func generateDeployKeyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	createdBy := getUsernameFromToken(r)
-	if createdBy == "" {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
+	tenantID := tenantIDFromCtx(r)
+	createdBy := usernameFromCtx(r)
+	db := dbFromCtx(r)
 
 	var req CreateDeployKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -73,13 +62,14 @@ func generateDeployKeyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate a unique ID and a random agent key for this deploy key
+	// Generate a unique key ID and a random agent secret
 	id := randomHex(8)
 	agentKey := randomHex(16)
 
-	// Build the payload the agent will decode
+	// Build the payload — includes tenant_id so backend can route requests
 	payload := DeployKeyPayload{
 		ID:         id,
+		TenantID:   tenantID,
 		BackendURL: req.BackendURL,
 		Key:        agentKey,
 	}
@@ -89,10 +79,9 @@ func generateDeployKeyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Encode as base64url and prefix with AGT-
 	token := deployKeyPrefix + base64.URLEncoding.EncodeToString(payloadJSON)
 
-	// Store in database (store the agent key so backend can validate agents using it)
+	// Store in tenant's database
 	_, err = db.Exec(`
 		INSERT INTO deploy_keys (id, label, token, agent_key, backend_url, created_by)
 		VALUES (?, ?, ?, ?, ?, ?)
@@ -102,7 +91,7 @@ func generateDeployKeyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Deploy key created: %s (%s) by %s", id, req.Label, createdBy)
+	log.Printf("Deploy key created: %s (%s) by %s in tenant %s", id, req.Label, createdBy, tenantID)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
@@ -115,6 +104,8 @@ func generateDeployKeyHandler(w http.ResponseWriter, r *http.Request) {
 // ── List ───────────────────────────────────────────────────────────────────
 
 func listDeployKeysHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
+
 	rows, err := db.Query(`
 		SELECT id, label, token, created_by, created_at,
 		       COALESCE(last_used, ''), revoked
@@ -133,6 +124,8 @@ func listDeployKeysHandler(w http.ResponseWriter, r *http.Request) {
 		var revoked int
 		rows.Scan(&k.ID, &k.Label, &k.Token, &k.CreatedBy, &k.CreatedAt, &k.LastUsed, &revoked)
 		k.Revoked = revoked == 1
+		// Never return the full token to the list — only show it once at creation
+		k.Token = ""
 		keys = append(keys, k)
 	}
 
@@ -143,10 +136,8 @@ func listDeployKeysHandler(w http.ResponseWriter, r *http.Request) {
 // ── Revoke ─────────────────────────────────────────────────────────────────
 
 func revokeDeployKeyHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+	db := dbFromCtx(r)
+	tenantID := tenantIDFromCtx(r)
 
 	var req struct {
 		ID string `json:"id"`
@@ -161,65 +152,66 @@ func revokeDeployKeyHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
+	n, _ := result.RowsAffected()
+	if n == 0 {
 		http.Error(w, "key not found", http.StatusNotFound)
 		return
 	}
 
-	log.Printf("Deploy key revoked: %s", req.ID)
+	log.Printf("Deploy key revoked: %s in tenant %s", req.ID, tenantID)
 	w.WriteHeader(http.StatusOK)
 }
 
-// ── Validate (called by agent on registration) ─────────────────────────────
-// Agents now send X-Deploy-Key header instead of X-Agent-Key.
-// Backend decodes it, looks up the key in the DB, and validates it.
+// ── Validation (called by agent middleware) ────────────────────────────────
 
-func validateDeployKey(deployKey string) (agentKey string, err error) {
+// validateDeployKeyForTenant decodes an AGT- token and returns
+// the tenant ID and agent key. Also marks last_used in the tenant DB.
+func validateDeployKeyForTenant(deployKey string) (tenantID string, agentKey string, err error) {
 	if len(deployKey) <= len(deployKeyPrefix) {
-		return "", fmt.Errorf("invalid deploy key format")
+		return "", "", fmt.Errorf("invalid deploy key format")
 	}
 
 	encoded := deployKey[len(deployKeyPrefix):]
 	payloadJSON, err := base64.URLEncoding.DecodeString(encoded)
 	if err != nil {
-		return "", fmt.Errorf("invalid deploy key encoding")
+		return "", "", fmt.Errorf("invalid deploy key encoding")
 	}
 
 	var payload DeployKeyPayload
 	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
-		return "", fmt.Errorf("invalid deploy key payload")
+		return "", "", fmt.Errorf("invalid deploy key payload")
 	}
 
-	// Look up in database and check not revoked
+	if payload.TenantID == "" || payload.ID == "" {
+		return "", "", fmt.Errorf("deploy key missing required fields")
+	}
+
+	// Look up in tenant's database
+	db, err := getTenantDB(payload.TenantID)
+	if err != nil {
+		return "", "", fmt.Errorf("tenant not found")
+	}
+
 	var storedKey string
 	var revoked int
 	err = db.QueryRow(`
 		SELECT agent_key, revoked FROM deploy_keys WHERE id = ?
 	`, payload.ID).Scan(&storedKey, &revoked)
 	if err != nil {
-		return "", fmt.Errorf("deploy key not found")
+		return "", "", fmt.Errorf("deploy key not found")
 	}
 	if revoked == 1 {
-		return "", fmt.Errorf("deploy key has been revoked")
+		return "", "", fmt.Errorf("deploy key has been revoked")
 	}
 
-	// Update last_used timestamp
+	// Update last_used
 	db.Exec(`UPDATE deploy_keys SET last_used = CURRENT_TIMESTAMP WHERE id = ?`, payload.ID)
 
-	return storedKey, nil
+	return payload.TenantID, storedKey, nil
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-func randomHex(n int) string {
-	b := make([]byte, n)
-	rand.Read(b)
-	result := make([]byte, n*2)
-	const hexChars = "0123456789abcdef"
-	for i, v := range b {
-		result[i*2] = hexChars[v>>4]
-		result[i*2+1] = hexChars[v&0xf]
-	}
-	return string(result)
+// validateDeployKey is kept for backward compatibility
+func validateDeployKey(deployKey string) (string, error) {
+	_, agentKey, err := validateDeployKeyForTenant(deployKey)
+	return agentKey, err
 }

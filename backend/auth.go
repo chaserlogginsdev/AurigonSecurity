@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -14,130 +15,120 @@ import (
 )
 
 var jwtSecret []byte
+var errUnauthorized = errors.New("unauthorized")
 
 func initJWT() {
 	secret := os.Getenv("AURIGON_JWT_SECRET")
 	if secret == "" {
-		secret = "aurigon-dev-secret-change-in-production"
-		log.Println("WARNING: AURIGON_JWT_SECRET is not set.")
-		log.Println("WARNING: Using insecure default secret. Set this variable before deploying.")
-		log.Println("WARNING: Generate one with: openssl rand -hex 32")
-	} else {
-		if len(secret) < 32 {
-			log.Fatalf("AURIGON_JWT_SECRET must be at least 32 characters. Generate one with: openssl rand -hex 32")
-		}
-		log.Println("JWT secret loaded from environment.")
+		secret = "aurigon-dev-secret-change-in-production-32chars"
+		log.Println("WARNING: Using default JWT secret. Set AURIGON_JWT_SECRET in production.")
+	}
+	if len(secret) < 32 {
+		log.Fatal("AURIGON_JWT_SECRET must be at least 32 characters.")
 	}
 	jwtSecret = []byte(secret)
 }
 
-// ── Rate limiting ─────────────────────────────────────────────────────────────
+// ── Rate limiting ──────────────────────────────────────────────────────────
 
-type loginAttempt struct {
-	count    int
-	lockedAt time.Time
+type rateLimiter struct {
+	mu       sync.Mutex
+	attempts map[string][]time.Time
 }
 
-var (
-	loginAttempts = map[string]*loginAttempt{}
-	loginMu       sync.Mutex
-)
+var loginLimiter = &rateLimiter{attempts: map[string][]time.Time{}}
 
-func getClientIP(r *http.Request) string {
-	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-		return strings.Split(ip, ",")[0]
+func (rl *rateLimiter) allow(key string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	window := now.Add(-15 * time.Minute)
+	attempts := rl.attempts[key]
+	var recent []time.Time
+	for _, t := range attempts {
+		if t.After(window) {
+			recent = append(recent, t)
+		}
 	}
-	return strings.Split(r.RemoteAddr, ":")[0]
-}
-
-func isRateLimited(ip string) bool {
-	loginMu.Lock()
-	defer loginMu.Unlock()
-	a, ok := loginAttempts[ip]
-	if !ok {
+	rl.attempts[key] = recent
+	if len(recent) >= 5 {
 		return false
 	}
-	if !a.lockedAt.IsZero() {
-		if time.Since(a.lockedAt) > 15*time.Minute {
-			delete(loginAttempts, ip)
-			return false
-		}
-		return true
-	}
-	return false
+	rl.attempts[key] = append(rl.attempts[key], now)
+	return true
 }
 
-func recordFailedLogin(ip string) {
-	loginMu.Lock()
-	defer loginMu.Unlock()
-	a, ok := loginAttempts[ip]
-	if !ok {
-		a = &loginAttempt{}
-		loginAttempts[ip] = a
-	}
-	a.count++
-	log.Printf("Failed login attempt %d/5 from IP: %s\n", a.count, ip)
-	if a.count >= 5 {
-		a.lockedAt = time.Now()
-		log.Printf("Rate limit triggered for IP: %s — locked for 15 minutes\n", ip)
-	}
-}
-
-func clearLoginAttempts(ip string) {
-	loginMu.Lock()
-	defer loginMu.Unlock()
-	delete(loginAttempts, ip)
-}
-
-// ── Login ─────────────────────────────────────────────────────────────────────
+// ── Login ──────────────────────────────────────────────────────────────────
 
 type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	TenantSlug string `json:"tenant_slug"` // which tenant to log into
+	Username   string `json:"username"`
+	Password   string `json:"password"`
 }
 
 type LoginResponse struct {
-	Token    string `json:"token"`
-	Username string `json:"username"`
-	Role     string `json:"role"`
+	Token      string `json:"token"`
+	Username   string `json:"username"`
+	Role       string `json:"role"`
+	TenantID   string `json:"tenant_id"`
+	TenantName string `json:"tenant_name"`
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request) {
-	ip := getClientIP(r)
-
-	if isRateLimited(ip) {
-		http.Error(w, "too many failed attempts — try again in 15 minutes", http.StatusTooManyRequests)
-		return
-	}
-
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	var id int
-	var hashedPassword, role string
-	err := db.QueryRow(`SELECT id, password, role FROM users WHERE username = ?`, req.Username).
-		Scan(&id, &hashedPassword, &role)
+	// Rate limit by IP
+	ip := r.RemoteAddr
+	if !loginLimiter.allow(ip) {
+		http.Error(w, "too many login attempts — try again in 15 minutes", http.StatusTooManyRequests)
+		return
+	}
+
+	if req.TenantSlug == "" {
+		http.Error(w, "tenant_slug is required", http.StatusBadRequest)
+		return
+	}
+
+	// Look up tenant
+	tenant, err := getTenantBySlug(req.TenantSlug)
 	if err != nil {
-		recordFailedLogin(ip)
+		// Don't reveal whether tenant exists
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	// Get tenant's database
+	db, err := getTenantDB(tenant.ID)
+	if err != nil {
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	// Look up user in tenant's database
+	var hashedPassword, role string
+	err = db.QueryRow(`SELECT password, role FROM users WHERE username = ?`, req.Username).
+		Scan(&hashedPassword, &role)
+	if err != nil {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(req.Password)); err != nil {
-		recordFailedLogin(ip)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
-	clearLoginAttempts(ip)
-
+	// Issue JWT with tenant_id embedded
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub":  req.Username,
-		"role": role,
-		"exp":  time.Now().Add(24 * time.Hour).Unix(),
+		"sub":       req.Username,
+		"username":  req.Username,
+		"role":      role,
+		"tenant_id": tenant.ID,
+		"exp":       time.Now().Add(24 * time.Hour).Unix(),
 	})
 
 	tokenString, err := token.SignedString(jwtSecret)
@@ -146,11 +137,18 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Login: %s from %s\n", req.Username, ip)
-	json.NewEncoder(w).Encode(LoginResponse{Token: tokenString, Username: req.Username, Role: role})
+	log.Printf("Login: %s @ %s (%s)", req.Username, tenant.Slug, tenant.ID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(LoginResponse{
+		Token:      tokenString,
+		Username:   req.Username,
+		Role:       role,
+		TenantID:   tenant.ID,
+		TenantName: tenant.Name,
+	})
 }
 
-// ── Change password ───────────────────────────────────────────────────────────
+// ── Change password ────────────────────────────────────────────────────────
 
 type ChangePasswordRequest struct {
 	CurrentPassword string `json:"current_password"`
@@ -158,8 +156,9 @@ type ChangePasswordRequest struct {
 }
 
 func changePasswordHandler(w http.ResponseWriter, r *http.Request) {
-	username := getUsernameFromToken(r)
-	if username == "" {
+	username := usernameFromCtx(r)
+	db := dbFromCtx(r)
+	if username == "" || db == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -176,9 +175,8 @@ func changePasswordHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var hashedPassword string
-	err := db.QueryRow(`SELECT password FROM users WHERE username = ?`, username).
-		Scan(&hashedPassword)
-	if err != nil {
+	if err := db.QueryRow(`SELECT password FROM users WHERE username = ?`, username).
+		Scan(&hashedPassword); err != nil {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
@@ -195,16 +193,16 @@ func changePasswordHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.Exec(`UPDATE users SET password = ? WHERE username = ?`, string(newHash), username)
-	log.Printf("Password changed for user: %s\n", username)
+	log.Printf("Password changed: %s @ %s", username, tenantIDFromCtx(r))
 	w.WriteHeader(http.StatusOK)
 }
 
-// ── JWT middleware ────────────────────────────────────────────────────────────
+// ── JWT helpers ────────────────────────────────────────────────────────────
 
-func getUsernameFromToken(r *http.Request) string {
+func parseJWT(r *http.Request) (jwt.MapClaims, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-		return ""
+		return nil, errUnauthorized
 	}
 	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 	token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
@@ -214,32 +212,47 @@ func getUsernameFromToken(r *http.Request) string {
 		return jwtSecret, nil
 	})
 	if err != nil || !token.Valid {
-		return ""
+		return nil, errUnauthorized
 	}
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
+		return nil, errUnauthorized
+	}
+	return claims, nil
+}
+
+// getUsernameFromToken is kept for backward compat — prefer usernameFromCtx(r)
+func getUsernameFromToken(r *http.Request) string {
+	claims, err := parseJWT(r)
+	if err != nil {
 		return ""
 	}
 	sub, _ := claims["sub"].(string)
 	return sub
 }
 
+// authMiddleware validates JWT and injects tenant context.
+// Use tenantMiddleware instead — this is kept for routes that don't need tenant DB.
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return tenantMiddleware(next)
+}
+
+// adminOnly blocks non-admin users — use after tenantMiddleware.
+func adminOnly(next http.HandlerFunc) http.HandlerFunc {
+	return adminOnlyMiddleware(next)
+}
+
+// corsMiddleware handles CORS preflight and headers.
+func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-			http.Error(w, "missing token", http.StatusUnauthorized)
-			return
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Agent-Key, X-Deploy-Key")
 		}
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, jwt.ErrSignatureInvalid
-			}
-			return jwtSecret, nil
-		})
-		if err != nil || !token.Valid {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next(w, r)

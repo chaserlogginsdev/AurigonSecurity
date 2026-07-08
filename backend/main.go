@@ -1,9 +1,7 @@
 package main
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -36,23 +34,33 @@ type InventoryRequest struct {
 	Accounts []AccountPayload `json:"accounts"`
 }
 
+type MachineInfoRequest struct {
+	DeviceID       string   `json:"device_id"`
+	Domain         string   `json:"domain"`
+	IsDomainJoined bool     `json:"is_domain_joined"`
+	IPAddresses    []string `json:"ip_addresses"`
+	OSVersion      string   `json:"os_version"`
+}
+
 type ActionRow struct {
-	ID         int    `json:"id"`
-	MachineID  string `json:"machine_id"`
-	Hostname   string `json:"hostname"`
-	Type       string `json:"type"`
-	Username   string `json:"username"`
-	CreatedBy  string `json:"created_by"`
-	Status     string `json:"status"`
-	CreatedAt  string `json:"created_at"`
-	ExecutedAt string `json:"executed_at"`
-	Result     string `json:"result"`
+	ID         int               `json:"id"`
+	MachineID  string            `json:"machine_id"`
+	Hostname   string            `json:"hostname"`
+	Type       string            `json:"type"`
+	Username   string            `json:"username"`
+	Params     map[string]string `json:"params,omitempty"`
+	CreatedBy  string            `json:"created_by"`
+	Status     string            `json:"status"`
+	CreatedAt  string            `json:"created_at"`
+	ExecutedAt string            `json:"executed_at"`
+	Result     string            `json:"result"`
 }
 
 type CreateActionRequest struct {
-	MachineID string `json:"machine_id"`
-	Type      string `json:"type"`
-	Username  string `json:"username"`
+	MachineID string            `json:"machine_id"`
+	Type      string            `json:"type"`
+	Username  string            `json:"username"`
+	Params    map[string]string `json:"params"`
 }
 
 type ActionResultRequest struct {
@@ -62,78 +70,20 @@ type ActionResultRequest struct {
 }
 
 type MachineRow struct {
-	ID       string `json:"id"`
-	Hostname string `json:"hostname"`
-	LastSeen string `json:"last_seen"`
+	ID             string   `json:"id"`
+	Hostname       string   `json:"hostname"`
+	Domain         string   `json:"domain"`
+	IsDomainJoined bool     `json:"is_domain_joined"`
+	IPAddresses    []string `json:"ip_addresses"`
+	OSVersion      string   `json:"os_version"`
+	LastSeen       string   `json:"last_seen"`
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-func generateToken() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// corsMiddleware allows requests from any origin.
-// In production the dashboard is served from the same port so CORS isn't
-// needed, but we keep it permissive for dev mode (npm run dev on :5173).
-func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Agent-Key, X-Deploy-Key")
-		}
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next(w, r)
-	}
-}
-
-// agentAuthMiddleware accepts either:
-//   - X-Deploy-Key header (new — tenant deploy key)
-//   - X-Agent-Key header  (legacy — raw shared secret)
-func agentAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Try deploy key first (new method)
-		deployKey := r.Header.Get("X-Deploy-Key")
-		if deployKey != "" {
-			_, err := validateDeployKey(deployKey)
-			if err != nil {
-				log.Printf("Rejected agent request from %s — invalid deploy key: %v", r.RemoteAddr, err)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			next(w, r)
-			return
-		}
-
-		// Fall back to legacy agent key
-		expectedKey := os.Getenv("AURIGON_AGENT_KEY")
-		if expectedKey != "" {
-			agentKey := r.Header.Get("X-Agent-Key")
-			if agentKey != expectedKey {
-				log.Printf("Rejected agent request from %s — invalid agent key", r.RemoteAddr)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			next(w, r)
-			return
-		}
-
-		// No auth configured — warn but allow (dev mode only)
-		log.Println("WARNING: No agent auth configured. Set AURIGON_AGENT_KEY or use deploy keys.")
-		next(w, r)
-	}
-}
-
-// ── Agent handlers ─────────────────────────────────────────────────────────
+// ── Agent handlers — use tenant DB from context ────────────────────────────
 
 func registerHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
+
 	var req RegisterRequest
 	json.NewDecoder(r.Body).Decode(&req)
 	if req.Hostname == "" {
@@ -145,18 +95,48 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		Scan(&existingID, &existingToken)
 	if err == nil {
 		db.Exec(`UPDATE machines SET last_seen = CURRENT_TIMESTAMP WHERE id = ?`, existingID)
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(RegisterResponse{DeviceID: existingID, Token: existingToken})
 		return
 	}
 
-	id := generateToken()[:12]
-	token := generateToken()
+	id := randomHex(6)
+	token := randomHex(16)
 	db.Exec(`INSERT INTO machines (id, hostname, token) VALUES (?, ?, ?)`, id, req.Hostname, token)
+	log.Printf("New machine: %s (%s) in tenant %s", req.Hostname, id, tenantIDFromCtx(r))
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(RegisterResponse{DeviceID: id, Token: token})
-	log.Printf("New machine: %s (%s)\n", req.Hostname, id)
+}
+
+func machineInfoHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
+
+	var req MachineInfoRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	ipStr := strings.Join(req.IPAddresses, ",")
+	isDomainInt := 0
+	if req.IsDomainJoined {
+		isDomainInt = 1
+	}
+
+	db.Exec(`
+		UPDATE machines SET
+			domain = ?, is_domain_joined = ?,
+			ip_addresses = ?, os_version = ?,
+			last_seen = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, req.Domain, isDomainInt, ipStr, req.OSVersion, req.DeviceID)
+
+	w.WriteHeader(http.StatusOK)
 }
 
 func inventoryHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
+
 	var inv InventoryRequest
 	if err := json.NewDecoder(r.Body).Decode(&inv); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -165,7 +145,11 @@ func inventoryHandler(w http.ResponseWriter, r *http.Request) {
 
 	db.Exec(`UPDATE machines SET last_seen = CURRENT_TIMESTAMP WHERE id = ?`, inv.DeviceID)
 
+	// Track which usernames are in this upload so we can reconcile afterward
+	seen := make(map[string]bool, len(inv.Accounts))
+
 	for _, a := range inv.Accounts {
+		seen[a.Username] = true
 		db.Exec(`
 			INSERT INTO accounts (machine_id, username, sid, enabled, is_admin, description, last_logon, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -176,11 +160,36 @@ func inventoryHandler(w http.ResponseWriter, r *http.Request) {
 		`, inv.DeviceID, a.Username, a.SID, a.Enabled, a.IsAdmin, a.Description, a.LastLogon)
 	}
 
-	log.Printf("Inventory: %s — %d accounts\n", inv.DeviceID, len(inv.Accounts))
+	// Reconcile: remove any account rows for this machine that were NOT in
+	// this upload — these are accounts that were deleted from Windows
+	// (e.g. via delete_account action, or manually) since the last sync.
+	// Skip this entirely if the upload is empty — an empty inventory is more
+	// likely a transient agent error than every account being deleted.
+	if len(inv.Accounts) > 0 {
+		existingRows, err := db.Query(`SELECT username FROM accounts WHERE machine_id = ?`, inv.DeviceID)
+		if err == nil {
+			var stale []string
+			for existingRows.Next() {
+				var username string
+				existingRows.Scan(&username)
+				if !seen[username] {
+					stale = append(stale, username)
+				}
+			}
+			existingRows.Close()
+			for _, username := range stale {
+				db.Exec(`DELETE FROM accounts WHERE machine_id = ? AND username = ?`, inv.DeviceID, username)
+				log.Printf("Removed stale account record: %s on %s (no longer present on machine)", username, inv.DeviceID)
+			}
+		}
+	}
+
+	log.Printf("Inventory: %s — %d accounts", inv.DeviceID, len(inv.Accounts))
 	w.WriteHeader(http.StatusOK)
 }
 
 func agentActionsHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
 	deviceID := r.URL.Query().Get("device_id")
 	if deviceID == "" {
 		json.NewEncoder(w).Encode([]ActionRow{})
@@ -188,7 +197,8 @@ func agentActionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(`
-		SELECT id, machine_id, '', type, username, created_by, status, created_at,
+		SELECT id, machine_id, '', type, username, COALESCE(params, '{}'),
+			created_by, status, created_at,
 			COALESCE(executed_at, ''), COALESCE(result, '')
 		FROM actions WHERE machine_id = ? AND status = 'pending'
 		ORDER BY created_at ASC
@@ -202,33 +212,44 @@ func agentActionsHandler(w http.ResponseWriter, r *http.Request) {
 	actions := []ActionRow{}
 	for rows.Next() {
 		var a ActionRow
-		rows.Scan(&a.ID, &a.MachineID, &a.Hostname, &a.Type, &a.Username,
+		var paramsJSON string
+		rows.Scan(&a.ID, &a.MachineID, &a.Hostname, &a.Type, &a.Username, &paramsJSON,
 			&a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
+		var params map[string]string
+		if err := json.Unmarshal([]byte(paramsJSON), &params); err == nil {
+			a.Params = params
+		}
 		actions = append(actions, a)
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(actions)
 }
 
 func actionResultHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
+
 	var req ActionResultRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
 	db.Exec(`
 		UPDATE actions SET status = ?, result = ?, executed_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, req.Status, req.Result, req.ActionID)
-
-	log.Printf("Action %d: %s — %s\n", req.ActionID, req.Status, req.Result)
+	log.Printf("Action %d: %s", req.ActionID, req.Status)
 	w.WriteHeader(http.StatusOK)
 }
 
 // ── Dashboard handlers ─────────────────────────────────────────────────────
 
 func machinesHandler(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query(`SELECT id, hostname, last_seen FROM machines ORDER BY last_seen DESC`)
+	db := dbFromCtx(r)
+
+	rows, err := db.Query(`
+		SELECT id, hostname, domain, is_domain_joined, ip_addresses, os_version, last_seen
+		FROM machines ORDER BY last_seen DESC
+	`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -238,20 +259,29 @@ func machinesHandler(w http.ResponseWriter, r *http.Request) {
 	machines := []MachineRow{}
 	for rows.Next() {
 		var m MachineRow
-		rows.Scan(&m.ID, &m.Hostname, &m.LastSeen)
+		var ipStr string
+		var isDomainInt int
+		rows.Scan(&m.ID, &m.Hostname, &m.Domain, &isDomainInt, &ipStr, &m.OSVersion, &m.LastSeen)
+		m.IsDomainJoined = isDomainInt == 1
+		if ipStr != "" {
+			m.IPAddresses = strings.Split(ipStr, ",")
+		} else {
+			m.IPAddresses = []string{}
+		}
 		machines = append(machines, m)
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(machines)
 }
 
 func accountsHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
 	machineID := r.URL.Query().Get("machine_id")
 
 	var (
 		rows *sql.Rows
 		err  error
 	)
-
 	if machineID != "" {
 		rows, err = db.Query(`
 			SELECT username, sid, enabled, is_admin, description, last_logon
@@ -263,7 +293,6 @@ func accountsHandler(w http.ResponseWriter, r *http.Request) {
 			FROM accounts ORDER BY username
 		`)
 	}
-
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -276,11 +305,13 @@ func accountsHandler(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&a.Username, &a.SID, &a.Enabled, &a.IsAdmin, &a.Description, &a.LastLogon)
 		accounts = append(accounts, a)
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(accounts)
 }
 
 func createActionHandler(w http.ResponseWriter, r *http.Request) {
-	createdBy := getUsernameFromToken(r)
+	db := dbFromCtx(r)
+	createdBy := usernameFromCtx(r)
 	if createdBy == "" {
 		createdBy = "unknown"
 	}
@@ -294,28 +325,76 @@ func createActionHandler(w http.ResponseWriter, r *http.Request) {
 	validTypes := map[string]bool{
 		"disable_account": true,
 		"enable_account":  true,
+		"create_account":  true,
+		"delete_account":  true,
+		"set_admin":       true,
+		"remove_admin":    true,
 	}
 	if !validTypes[req.Type] {
 		http.Error(w, "invalid action type", http.StatusBadRequest)
 		return
 	}
 
+	if req.Username == "" {
+		http.Error(w, "username is required", http.StatusBadRequest)
+		return
+	}
+
+	// create_account requires a password param
+	if req.Type == "create_account" {
+		pw := req.Params["password"]
+		if len(pw) < 8 {
+			http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+			return
+		}
+	}
+
+	if req.Params == nil {
+		req.Params = map[string]string{}
+	}
+	paramsJSON, err := json.Marshal(req.Params)
+	if err != nil {
+		http.Error(w, "invalid params", http.StatusBadRequest)
+		return
+	}
+
+	// Idempotency guard: reject if there's already a pending action of the
+	// same type for this username on this machine. Prevents duplicate
+	// actions from double-clicks or accidental resubmits from executing
+	// twice (e.g. two "delete_account" actions racing each other).
+	var existingID int
+	err = db.QueryRow(`
+		SELECT id FROM actions
+		WHERE machine_id = ? AND username = ? AND type = ? AND status = 'pending'
+		LIMIT 1
+	`, req.MachineID, req.Username, req.Type).Scan(&existingID)
+	if err == nil {
+		// A matching pending action already exists — return it instead of creating a duplicate
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"action_id": existingID,
+			"duplicate": true,
+		})
+		return
+	}
+
 	result, err := db.Exec(`
-		INSERT INTO actions (machine_id, type, username, created_by, status)
-		VALUES (?, ?, ?, ?, 'pending')
-	`, req.MachineID, req.Type, req.Username, createdBy)
+		INSERT INTO actions (machine_id, type, username, params, created_by, status)
+		VALUES (?, ?, ?, ?, ?, 'pending')
+	`, req.MachineID, req.Type, req.Username, string(paramsJSON), createdBy)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	id, _ := result.LastInsertId()
-	log.Printf("Action queued: %s %s on %s by %s (id: %d)\n",
-		req.Type, req.Username, req.MachineID, createdBy, id)
+	log.Printf("Action queued: %s %s on %s by %s", req.Type, req.Username, req.MachineID, createdBy)
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int64{"action_id": id})
 }
 
 func actionsStatusHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
 	machineID := r.URL.Query().Get("machine_id")
 	if machineID == "" {
 		http.Error(w, "machine_id required", http.StatusBadRequest)
@@ -341,17 +420,20 @@ func actionsStatusHandler(w http.ResponseWriter, r *http.Request) {
 			&a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
 		actions = append(actions, a)
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(actions)
 }
 
 func auditLogHandler(w http.ResponseWriter, r *http.Request) {
+	db := dbFromCtx(r)
+
 	rows, err := db.Query(`
-		SELECT a.id, a.machine_id, m.hostname, a.type, a.username, a.created_by,
-			a.status, a.created_at, COALESCE(a.executed_at, ''), COALESCE(a.result, '')
+		SELECT a.id, a.machine_id, COALESCE(m.hostname,''), a.type, a.username,
+			a.created_by, a.status, a.created_at,
+			COALESCE(a.executed_at,''), COALESCE(a.result,'')
 		FROM actions a
 		LEFT JOIN machines m ON a.machine_id = m.id
-		ORDER BY a.created_at DESC
-		LIMIT 200
+		ORDER BY a.created_at DESC LIMIT 200
 	`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -366,53 +448,97 @@ func auditLogHandler(w http.ResponseWriter, r *http.Request) {
 			&a.CreatedBy, &a.Status, &a.CreatedAt, &a.ExecutedAt, &a.Result)
 		actions = append(actions, a)
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(actions)
+}
+
+// ── Bootstrap operator tenant (for local dev) ──────────────────────────────
+// Creates a default tenant on first run if none exist.
+func bootstrapDevTenant() {
+	tenants, err := listTenants()
+	if err != nil || len(tenants) > 0 {
+		return
+	}
+
+	slug := os.Getenv("AURIGON_TENANT_SLUG")
+	name := os.Getenv("AURIGON_TENANT_NAME")
+	pass := os.Getenv("AURIGON_ADMIN_PASSWORD")
+
+	if slug == "" {
+		slug = "default"
+	}
+	if name == "" {
+		name = "Default Tenant"
+	}
+	if pass == "" {
+		log.Fatal("AURIGON_ADMIN_PASSWORD must be set to provision the first tenant")
+	}
+
+	tenant, err := provisionTenant(name, slug, pass)
+	if err != nil {
+		log.Fatalf("Failed to provision default tenant: %v", err)
+	}
+
+	log.Printf("Default tenant created — slug: %q, login with admin / %s", tenant.Slug, "[your AURIGON_ADMIN_PASSWORD]")
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
 
 func main() {
-	initDB()
+	// Master DB (tenant registry)
+	initMasterDB()
+
+	// JWT
 	initJWT()
 
-	// ── Agent endpoints — accept deploy key or legacy agent key ───────────
-	http.HandleFunc("/register",      corsMiddleware(agentAuthMiddleware(registerHandler)))
-	http.HandleFunc("/inventory",     corsMiddleware(agentAuthMiddleware(inventoryHandler)))
-	http.HandleFunc("/action-result", corsMiddleware(agentAuthMiddleware(actionResultHandler)))
-	http.HandleFunc("/actions",       corsMiddleware(agentAuthMiddleware(agentActionsHandler)))
+	// Pre-load all tenant DBs
+	preloadTenantDBs()
 
-	// ── Auth ──────────────────────────────────────────────────────────────
-	http.HandleFunc("/login",           corsMiddleware(loginHandler))
-	http.HandleFunc("/change-password", corsMiddleware(authMiddleware(changePasswordHandler)))
+	// Bootstrap a default tenant for local dev if none exist
+	bootstrapDevTenant()
 
-	// ── Dashboard API — JWT protected ─────────────────────────────────────
-	http.HandleFunc("/machines",       corsMiddleware(authMiddleware(machinesHandler)))
-	http.HandleFunc("/accounts",       corsMiddleware(authMiddleware(accountsHandler)))
-	http.HandleFunc("/actions/create", corsMiddleware(authMiddleware(createActionHandler)))
-	http.HandleFunc("/actions/status", corsMiddleware(authMiddleware(actionsStatusHandler)))
-	http.HandleFunc("/audit",          corsMiddleware(authMiddleware(auditLogHandler)))
+	// ── Agent endpoints (tenant routed via deploy key) ────────────────────
+	http.HandleFunc("/register",     corsMiddleware(agentTenantMiddleware(registerHandler)))
+	http.HandleFunc("/machine-info", corsMiddleware(agentTenantMiddleware(machineInfoHandler)))
+	http.HandleFunc("/inventory",    corsMiddleware(agentTenantMiddleware(inventoryHandler)))
+	http.HandleFunc("/action-result",corsMiddleware(agentTenantMiddleware(actionResultHandler)))
+	http.HandleFunc("/actions",      corsMiddleware(agentTenantMiddleware(agentActionsHandler)))
 
-	// ── Users — admin only ────────────────────────────────────────────────
-	http.HandleFunc("/users",        corsMiddleware(authMiddleware(adminOnly(listUsersHandler))))
-	http.HandleFunc("/users/create", corsMiddleware(authMiddleware(adminOnly(createUserHandler))))
-	http.HandleFunc("/users/delete", corsMiddleware(authMiddleware(adminOnly(deleteUserHandler))))
+	// ── Auth (tenant resolved from slug in request body) ──────────────────
+	http.HandleFunc("/login", corsMiddleware(loginHandler))
+
+	// ── Dashboard API (tenant resolved from JWT) ──────────────────────────
+	http.HandleFunc("/change-password", corsMiddleware(tenantMiddleware(changePasswordHandler)))
+	http.HandleFunc("/machines",        corsMiddleware(tenantMiddleware(machinesHandler)))
+	http.HandleFunc("/accounts",        corsMiddleware(tenantMiddleware(accountsHandler)))
+	http.HandleFunc("/actions/create",  corsMiddleware(tenantMiddleware(createActionHandler)))
+	http.HandleFunc("/actions/status",  corsMiddleware(tenantMiddleware(actionsStatusHandler)))
+	http.HandleFunc("/audit",           corsMiddleware(tenantMiddleware(auditLogHandler)))
+
+	// ── Users (admin only) ────────────────────────────────────────────────
+	http.HandleFunc("/users",        corsMiddleware(tenantMiddleware(adminOnly(listUsersHandler))))
+	http.HandleFunc("/users/create", corsMiddleware(tenantMiddleware(adminOnly(createUserHandler))))
+	http.HandleFunc("/users/delete", corsMiddleware(tenantMiddleware(adminOnly(deleteUserHandler))))
 
 	// ── Groups ────────────────────────────────────────────────────────────
-	http.HandleFunc("/groups",           corsMiddleware(authMiddleware(groupsHandler)))
-	http.HandleFunc("/groups/inventory", corsMiddleware(agentAuthMiddleware(groupInventoryHandler)))
+	http.HandleFunc("/groups",           corsMiddleware(tenantMiddleware(groupsHandler)))
+	http.HandleFunc("/groups/inventory", corsMiddleware(agentTenantMiddleware(groupInventoryHandler)))
 
-	// ── Deploy keys — admin only ──────────────────────────────────────────
-	http.HandleFunc("/deploy-keys",          corsMiddleware(authMiddleware(adminOnly(listDeployKeysHandler))))
-	http.HandleFunc("/deploy-keys/generate", corsMiddleware(authMiddleware(adminOnly(generateDeployKeyHandler))))
-	http.HandleFunc("/deploy-keys/revoke",   corsMiddleware(authMiddleware(adminOnly(revokeDeployKeyHandler))))
+	// ── Deploy keys ───────────────────────────────────────────────────────
+	http.HandleFunc("/deploy-keys",          corsMiddleware(tenantMiddleware(adminOnly(listDeployKeysHandler))))
+	http.HandleFunc("/deploy-keys/generate", corsMiddleware(tenantMiddleware(adminOnly(generateDeployKeyHandler))))
+	http.HandleFunc("/deploy-keys/revoke",   corsMiddleware(tenantMiddleware(adminOnly(revokeDeployKeyHandler))))
 
-	// ── Serve compiled Svelte dashboard from dist/ ────────────────────────
+	// ── Tenant management (operator only — protect this in production) ────
+	http.HandleFunc("/tenants",        corsMiddleware(listTenantsHandler))
+	http.HandleFunc("/tenants/create", corsMiddleware(createTenantHandler))
+
+	// ── Serve compiled dashboard ──────────────────────────────────────────
 	distDir := "./dist"
 	if _, err := os.Stat(distDir); err == nil {
 		fs := http.FileServer(http.Dir(distDir))
 		http.Handle("/assets/", fs)
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			// Don't serve index.html for API paths — let them 404 naturally
 			if strings.HasPrefix(r.URL.Path, "/api/") {
 				http.NotFound(w, r)
 				return
@@ -421,7 +547,7 @@ func main() {
 		})
 		log.Println("Serving dashboard from ./dist")
 	} else {
-		log.Println("No ./dist folder — dashboard not available. Run 'npm run build' in dashboard/")
+		log.Println("No ./dist folder — run 'npm run build' in dashboard/")
 	}
 
 	port := os.Getenv("AURIGON_PORT")
@@ -429,6 +555,6 @@ func main() {
 		port = "8080"
 	}
 
-	log.Printf("Aurigon Security backend running on http://localhost:%s\n", port)
+	log.Printf("Aurigon Security backend running on http://localhost:%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
