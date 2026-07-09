@@ -4,7 +4,6 @@
 
   export let onLogin = () => {};
 
-  let tenantSlug = '';
   let username = '';
   let password = '';
   let error = null;
@@ -12,9 +11,8 @@
 
   async function login() {
     loading = true; error = null;
-    if (!tenantSlug.trim()) { error = 'Please enter your workspace ID.'; loading = false; return; }
     try {
-      const data = await api.login(tenantSlug.trim(), username, password);
+      const data = await api.login(username, password);
       saveSession(data.token, data.username, data.role, data.tenant_id, data.tenant_name);
       onLogin();
     } catch (e) { error = e.message; }
@@ -36,11 +34,6 @@
       <div class="error">{error}</div>
     {/if}
 
-    <div class="field">
-      <label for="t">Workspace ID</label>
-      <input id="t" type="text" placeholder="e.g. acme"
-        bind:value={tenantSlug} on:keydown={keydown} autocomplete="organization"/>
-    </div>
     <div class="field">
       <label for="u">Username</label>
       <input id="u" type="text" placeholder="admin"

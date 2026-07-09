@@ -18,11 +18,11 @@ async function request(method, path, token, body) {
 
 export const api = {
   // Auth
-  login: (tenantSlug, username, password) =>
+  login: (username, password) =>
     fetch(BASE + '/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tenant_slug: tenantSlug, username, password }),
+      body: JSON.stringify({ username, password }),
     }).then(async res => {
       if (!res.ok) throw new Error('Invalid username or password');
       return res.json();

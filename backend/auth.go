@@ -88,9 +88,12 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Tenant isolation still runs under the hood, but login no longer
+	// requires the user to know or enter a workspace/tenant slug — we
+	// default to the "default" tenant. If multi-tenancy is needed again
+	// later, this is the only line that needs to change.
 	if req.TenantSlug == "" {
-		http.Error(w, "tenant_slug is required", http.StatusBadRequest)
-		return
+		req.TenantSlug = "default"
 	}
 
 	// Look up tenant
