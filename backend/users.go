@@ -83,6 +83,7 @@ func createUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("User created: %s (%s) in tenant %s", req.Username, req.Role, tenantIDFromCtx(r))
+	writeAudit(db, "", "dashboard_user_created", req.Username, usernameFromCtx(r), clientIP(r), "role: "+req.Role)
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -124,5 +125,6 @@ func deleteUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("User deleted: %s in tenant %s", req.Username, tenantIDFromCtx(r))
+	writeAudit(db, "", "dashboard_user_deleted", req.Username, requestingUser, clientIP(r), "")
 	w.WriteHeader(http.StatusOK)
 }

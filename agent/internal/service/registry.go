@@ -8,68 +8,55 @@ import (
 	"os"
 )
 
-const deployKeyPrefix = "AGT-"
+const agentKeyPrefix = "AGT-"
 
-// deployKeyPayload mirrors the backend's DeployKeyPayload struct
-type deployKeyPayload struct {
-	ID         string `json:"id"`
-	BackendURL string `json:"backend_url"`
+// agentTokenPayload mirrors the backend's agentTokenPayload struct.
+type agentTokenPayload struct {
+	TenantID   string `json:"tenant_id"`
 	Key        string `json:"key"`
+	BackendURL string `json:"backend_url"`
 }
 
-// ReadConfig returns BackendURL and AgentKey for the agent.
-//
-// Priority:
-//  1. AURIGON_DEPLOY_KEY env var (new — single tenant key)
-//  2. AURIGON_BACKEND_URL + AURIGON_AGENT_KEY env vars (legacy)
-func ReadConfig() (backendURL string, agentKey string, deployKey string, err error) {
-	// 1. Try deploy key first
-	dk := os.Getenv("AURIGON_DEPLOY_KEY")
-	if dk != "" {
-		backendURL, agentKey, err = decodeDeployKey(dk)
-		if err != nil {
-			return "", "", "", fmt.Errorf("invalid AURIGON_DEPLOY_KEY: %w", err)
-		}
-		log.Printf("Config loaded from deploy key (BackendURL: %s)", backendURL)
-		return backendURL, agentKey, dk, nil
+// ReadConfig returns the backend URL to connect to and the raw agent key
+// token to send on every request. The token itself carries the tenant
+// identity — the agent doesn't need to know or store anything else.
+func ReadConfig() (backendURL string, agentToken string, err error) {
+	token := os.Getenv("AURIGON_AGENT_KEY")
+	if token == "" {
+		return "", "", fmt.Errorf("AURIGON_AGENT_KEY is not set")
 	}
 
-	// 2. Fall back to legacy env vars
-	backendURL = os.Getenv("AURIGON_BACKEND_URL")
-	agentKey = os.Getenv("AURIGON_AGENT_KEY")
-
-	if backendURL == "" {
-		backendURL = "http://localhost:8080"
-		log.Println("AURIGON_BACKEND_URL not set, defaulting to http://localhost:8080")
-	}
-	if agentKey == "" {
-		return "", "", "", fmt.Errorf("no auth configured: set AURIGON_DEPLOY_KEY or AURIGON_AGENT_KEY")
+	backendURL, err = decodeAgentTokenBackendURL(token)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid AURIGON_AGENT_KEY: %w", err)
 	}
 
-	log.Printf("Config loaded from environment (BackendURL: %s)", backendURL)
-	return backendURL, agentKey, "", nil
+	log.Printf("Config loaded from agent key (BackendURL: %s)", backendURL)
+	return backendURL, token, nil
 }
 
-// decodeDeployKey decodes an AGT-... deploy key into its components.
-func decodeDeployKey(key string) (backendURL, agentKey string, err error) {
-	if len(key) <= len(deployKeyPrefix) || key[:len(deployKeyPrefix)] != deployKeyPrefix {
-		return "", "", fmt.Errorf("key must start with %s", deployKeyPrefix)
+// decodeAgentTokenBackendURL extracts just the backend URL from an AGT- token
+// so the agent knows where to connect. The full token is still sent as-is
+// on every request — the backend re-derives tenant identity from it.
+func decodeAgentTokenBackendURL(token string) (string, error) {
+	if len(token) <= len(agentKeyPrefix) || token[:len(agentKeyPrefix)] != agentKeyPrefix {
+		return "", fmt.Errorf("key must start with %s", agentKeyPrefix)
 	}
 
-	encoded := key[len(deployKeyPrefix):]
+	encoded := token[len(agentKeyPrefix):]
 	payloadJSON, err := base64.URLEncoding.DecodeString(encoded)
 	if err != nil {
-		return "", "", fmt.Errorf("invalid base64 encoding")
+		return "", fmt.Errorf("invalid base64 encoding")
 	}
 
-	var payload deployKeyPayload
+	var payload agentTokenPayload
 	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
-		return "", "", fmt.Errorf("invalid key payload")
+		return "", fmt.Errorf("invalid key payload")
 	}
 
-	if payload.BackendURL == "" || payload.Key == "" {
-		return "", "", fmt.Errorf("key is missing required fields")
+	if payload.BackendURL == "" {
+		return "", fmt.Errorf("key is missing backend_url")
 	}
 
-	return payload.BackendURL, payload.Key, nil
+	return payload.BackendURL, nil
 }

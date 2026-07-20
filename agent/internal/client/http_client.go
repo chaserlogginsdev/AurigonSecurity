@@ -2,18 +2,20 @@ package client
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"time"
 )
 
 type Client struct {
-	BaseURL   string
-	Token     string
-	AgentKey  string
-	DeployKey string // AGT-... token, takes priority over AgentKey
-	http      *http.Client
+	BaseURL    string
+	Token      string // per-machine session token, set after registration
+	AgentToken string // the AGT-... tenant key, sent on every request
+	http       *http.Client
 }
 
 type RegisterResponse struct {
@@ -26,12 +28,25 @@ type InventoryRequest struct {
 	Accounts interface{} `json:"accounts"`
 }
 
-func New(baseURL, agentKey, deployKey string) *Client {
+func New(baseURL, agentToken string) *Client {
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+
+	// DEV/TEST ONLY: allows the agent to trust a self-signed certificate
+	// while testing HTTPS locally, before a real CA-signed cert is in
+	// place. Never set this in a real deployment — it disables
+	// certificate validation entirely, which defeats the point of TLS.
+	if os.Getenv("AURIGON_INSECURE_SKIP_VERIFY") == "true" {
+		log.Println("WARNING: AURIGON_INSECURE_SKIP_VERIFY is enabled — TLS certificate validation is OFF.")
+		log.Println("WARNING: this must only be used for local testing with a self-signed cert. Never use in production.")
+		httpClient.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
+
 	return &Client{
-		BaseURL:   baseURL,
-		AgentKey:  agentKey,
-		DeployKey: deployKey,
-		http:      &http.Client{Timeout: 10 * time.Second},
+		BaseURL:    baseURL,
+		AgentToken: agentToken,
+		http:       httpClient,
 	}
 }
 
@@ -41,11 +56,8 @@ func (c *Client) addAuthHeaders(req *http.Request) {
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	// Deploy key takes priority over legacy agent key
-	if c.DeployKey != "" {
-		req.Header.Set("X-Deploy-Key", c.DeployKey)
-	} else if c.AgentKey != "" {
-		req.Header.Set("X-Agent-Key", c.AgentKey)
+	if c.AgentToken != "" {
+		req.Header.Set("X-Agent-Key", c.AgentToken)
 	}
 }
 

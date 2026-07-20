@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 )
 
 // Context keys
@@ -20,12 +22,11 @@ const (
 
 // tenantFromRequest extracts the tenant ID from the request.
 // For dashboard requests: reads the JWT and extracts tenant_id claim.
-// For agent requests: decodes the deploy key and looks up the tenant.
+// For agent requests: decodes the agent key token and looks up the tenant.
 func tenantFromRequest(r *http.Request) (string, *sql.DB, error) {
-	// Try deploy key first (agent requests)
-	deployKey := r.Header.Get("X-Deploy-Key")
-	if deployKey != "" {
-		tenantID, _, err := validateDeployKeyForTenant(deployKey)
+	agentKey := r.Header.Get("X-Agent-Key")
+	if agentKey != "" {
+		tenantID, err := validateAgentToken(agentKey)
 		if err != nil {
 			return "", nil, err
 		}
@@ -98,35 +99,41 @@ func tenantMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// agentTenantMiddleware validates agent auth (deploy key or legacy key)
-// and injects the tenant DB into the request context.
+// agentTenantMiddleware validates the agent's key token and injects the
+// tenant DB into the request context.
 func agentTenantMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		deployKey := r.Header.Get("X-Deploy-Key")
-		if deployKey != "" {
-			tenantID, _, err := validateDeployKeyForTenant(deployKey)
-			if err != nil {
-				log.Printf("Rejected agent — invalid deploy key from %s: %v", r.RemoteAddr, err)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-
-			db, err := getTenantDB(tenantID)
-			if err != nil {
-				http.Error(w, "tenant not found", http.StatusUnauthorized)
-				return
-			}
-
-			ctx := r.Context()
-			ctx = context.WithValue(ctx, ctxTenantID, tenantID)
-			ctx = context.WithValue(ctx, ctxTenantDB, db)
-			next(w, r.WithContext(ctx))
+		if agentAuthFailureLimiter.tooManyRecent(r.RemoteAddr) {
+			log.Printf("Rejected agent request from %s — too many recent auth failures", r.RemoteAddr)
+			http.Error(w, "too many failed attempts — try again later", http.StatusTooManyRequests)
 			return
 		}
 
-		// Legacy: single-tenant mode using AURIGON_AGENT_KEY env var
-		// This allows existing deployments to keep working during migration
-		http.Error(w, "unauthorized: deploy key required", http.StatusUnauthorized)
+		agentKey := r.Header.Get("X-Agent-Key")
+		if agentKey == "" {
+			agentAuthFailureLimiter.recordFailure(r.RemoteAddr)
+			http.Error(w, "unauthorized: agent key required", http.StatusUnauthorized)
+			return
+		}
+
+		tenantID, err := validateAgentToken(agentKey)
+		if err != nil {
+			agentAuthFailureLimiter.recordFailure(r.RemoteAddr)
+			log.Printf("Rejected agent — invalid agent key from %s: %v", r.RemoteAddr, err)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		db, err := getTenantDB(tenantID)
+		if err != nil {
+			http.Error(w, "tenant not found", http.StatusUnauthorized)
+			return
+		}
+
+		ctx := r.Context()
+		ctx = context.WithValue(ctx, ctxTenantID, tenantID)
+		ctx = context.WithValue(ctx, ctxTenantDB, db)
+		next(w, r.WithContext(ctx))
 	}
 }
 
@@ -163,6 +170,33 @@ func adminOnlyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "admin access required", http.StatusForbidden)
 			return
 		}
+		next(w, r)
+	}
+}
+
+// operatorAuthMiddleware protects platform-operator endpoints (creating
+// and listing tenants) — these must never be reachable by a regular
+// tenant's login, since a tenant admin has no business seeing that other
+// tenants even exist.
+//
+// Fails CLOSED: if AURIGON_OPERATOR_KEY isn't set, these routes are
+// completely inaccessible rather than silently open. Set it explicitly
+// before you need to provision a new tenant.
+func operatorAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		expectedKey := os.Getenv("AURIGON_OPERATOR_KEY")
+		if expectedKey == "" {
+			http.Error(w, "operator endpoints are disabled — AURIGON_OPERATOR_KEY is not set", http.StatusForbidden)
+			return
+		}
+
+		providedKey := r.Header.Get("X-Operator-Key")
+		if providedKey == "" || subtle.ConstantTimeCompare([]byte(providedKey), []byte(expectedKey)) != 1 {
+			log.Printf("Rejected operator request from %s — invalid or missing X-Operator-Key", r.RemoteAddr)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
 		next(w, r)
 	}
 }

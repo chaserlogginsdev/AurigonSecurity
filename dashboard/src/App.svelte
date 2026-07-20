@@ -9,8 +9,9 @@
   import MachineDetail from './pages/MachineDetail.svelte';
   import AuditLog    from './pages/AuditLog.svelte';
   import Users       from './pages/Users.svelte';
-  import DeployKeys  from './pages/DeployKeys.svelte';
+  import DownloadAgent from './pages/DownloadAgent.svelte';
   import Settings    from './pages/Settings.svelte';
+  import ToastHost   from './components/ToastHost.svelte';
 
   let ready = false;
 
@@ -63,13 +64,15 @@
       {:else if $page === 'users'}
         <Users/>
       {:else if $page === 'deploy'}
-        <DeployKeys/>
+        <DownloadAgent/>
       {:else if $page === 'settings'}
         <Settings/>
       {/if}
     </main>
   </div>
 {/if}
+
+<ToastHost/>
 
 <style>
   :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; }

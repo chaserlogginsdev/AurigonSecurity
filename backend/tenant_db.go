@@ -80,6 +80,27 @@ func openTenantDB(path string) (*sql.DB, error) {
 func migrateTenantDB(db *sql.DB) {
 	migrations := []string{
 		`ALTER TABLE actions ADD COLUMN params TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE machines ADD COLUMN os_build TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE machines ADD COLUMN uptime_hours REAL NOT NULL DEFAULT 0`,
+		`ALTER TABLE machines ADD COLUMN free_disk_gb REAL NOT NULL DEFAULT 0`,
+		`ALTER TABLE machines ADD COLUMN total_memory_gb REAL NOT NULL DEFAULT 0`,
+		`ALTER TABLE machines ADD COLUMN pending_reboot INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE machines ADD COLUMN defender_enabled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE machines ADD COLUMN defender_realtime_protection INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE machines ADD COLUMN password_min_length INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE machines ADD COLUMN password_lockout_threshold INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE machines ADD COLUMN password_max_age_days INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE machines ADD COLUMN failed_logon_count_24h INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE accounts ADD COLUMN full_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE accounts ADD COLUMN password_last_set TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE accounts ADD COLUMN password_expires_date TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE accounts ADD COLUMN account_expires_date TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE accounts ADD COLUMN password_never_expires INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE accounts ADD COLUMN password_required INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE accounts ADD COLUMN user_may_change_password INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE accounts ADD COLUMN days_since_last_logon INTEGER NOT NULL DEFAULT -1`,
+		`ALTER TABLE accounts ADD COLUMN is_built_in INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE audit_log ADD COLUMN ip_address TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, m := range migrations {
 		db.Exec(m)
@@ -137,9 +158,13 @@ func provisionTenant(name, slug, adminPassword string) (*Tenant, error) {
 	tenantDBsMu.Unlock()
 
 	// Register in master DB
+	// Generate a permanent agent key secret for this tenant — this never
+	// changes for the lifetime of the tenant (unless explicitly rotated).
+	agentKeySecret := randomHex(20)
+
 	_, err = masterDB.Exec(`
-		INSERT INTO tenants (id, name, slug) VALUES (?, ?, ?)
-	`, id, name, slug)
+		INSERT INTO tenants (id, name, slug, agent_key) VALUES (?, ?, ?, ?)
+	`, id, name, slug, agentKeySecret)
 	if err != nil {
 		db.Close()
 		os.RemoveAll(dir)
@@ -168,6 +193,17 @@ func initTenantSchema(db *sql.DB) error {
 		is_domain_joined INTEGER NOT NULL DEFAULT 0,
 		ip_addresses     TEXT NOT NULL DEFAULT '',
 		os_version       TEXT NOT NULL DEFAULT '',
+		os_build                     TEXT NOT NULL DEFAULT '',
+		uptime_hours                 REAL NOT NULL DEFAULT 0,
+		free_disk_gb                 REAL NOT NULL DEFAULT 0,
+		total_memory_gb              REAL NOT NULL DEFAULT 0,
+		pending_reboot               INTEGER NOT NULL DEFAULT 0,
+		defender_enabled             INTEGER NOT NULL DEFAULT 0,
+		defender_realtime_protection INTEGER NOT NULL DEFAULT 0,
+		password_min_length          INTEGER NOT NULL DEFAULT 0,
+		password_lockout_threshold   INTEGER NOT NULL DEFAULT 0,
+		password_max_age_days        INTEGER NOT NULL DEFAULT 0,
+		failed_logon_count_24h       INTEGER NOT NULL DEFAULT 0,
 		last_seen        DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -179,7 +215,16 @@ func initTenantSchema(db *sql.DB) error {
 		enabled     BOOLEAN,
 		is_admin    BOOLEAN,
 		description TEXT,
+		full_name   TEXT NOT NULL DEFAULT '',
 		last_logon  TEXT,
+		password_last_set         TEXT NOT NULL DEFAULT '',
+		password_expires_date     TEXT NOT NULL DEFAULT '',
+		account_expires_date      TEXT NOT NULL DEFAULT '',
+		password_never_expires    INTEGER NOT NULL DEFAULT 0,
+		password_required         INTEGER NOT NULL DEFAULT 1,
+		user_may_change_password  INTEGER NOT NULL DEFAULT 1,
+		days_since_last_logon     INTEGER NOT NULL DEFAULT -1,
+		is_built_in               INTEGER NOT NULL DEFAULT 0,
 		updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (machine_id) REFERENCES machines(id),
 		UNIQUE(machine_id, username)
@@ -244,8 +289,22 @@ func initTenantSchema(db *sql.DB) error {
 		action_type TEXT NOT NULL,
 		username    TEXT NOT NULL,
 		performed_by TEXT NOT NULL,
+		ip_address  TEXT NOT NULL DEFAULT '',
 		detail      TEXT,
 		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS sessions (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		machine_id   TEXT NOT NULL,
+		username     TEXT NOT NULL,
+		session_name TEXT,
+		session_id   TEXT,
+		state        TEXT,
+		idle_time    TEXT,
+		logon_time   TEXT,
+		updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (machine_id) REFERENCES machines(id)
 	);
 	`
 	_, err := db.Exec(schema)

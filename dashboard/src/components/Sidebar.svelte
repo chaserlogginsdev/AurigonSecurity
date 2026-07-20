@@ -20,7 +20,7 @@
 
   const adminItems = [
     { id: 'users',     label: 'Users',       icon: '◎' },
-    { id: 'deploy',    label: 'Deploy Keys', icon: '⚿' },
+    { id: 'deploy',    label: 'Download Agent', icon: '⬇' },
   ];
 </script>
 

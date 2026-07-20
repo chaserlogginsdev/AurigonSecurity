@@ -21,6 +21,13 @@ func main() {
 	}
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
+	// Load AURIGON_AGENT_KEY and friends from a .env file next to the exe,
+	// if present. Real environment variables (e.g. set via NSSM) always
+	// take priority — this is a fallback, not a silent override. Keeping
+	// the agent key out of NSSM's AppEnvironmentExtra means changing it
+	// later is a one-file edit instead of re-typing every existing var.
+	loadDotEnv(filepath.Join(exeDir, ".env"))
+
 	stop := make(chan struct{})
 	if err := service.RunWithStop(stop); err != nil {
 		log.Fatalf("agent failed: %v", err)

@@ -11,7 +11,7 @@
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\aurigon-agent.iss
 ;
 ; Silent install:
-;   AurigonAgentSetup.exe /SILENT /DEPLOYKEY="AGT-..."
+;   AurigonAgentSetup.exe /SILENT /AGENTKEY="AGT-..."
 ; ─────────────────────────────────────────────────────────────────────────────
 
 #define AppName     "Aurigon Security Agent"
@@ -52,46 +52,45 @@ Filename: "{app}\nssm.exe"; Parameters: "stop {#ServiceName}";           Flags: 
 Filename: "{app}\nssm.exe"; Parameters: "remove {#ServiceName} confirm"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveSvc"
 
 ; ─────────────────────────────────────────────────────────────────────────────
-; One field only — the deploy key
+; One field only — the permanent tenant agent key
 ; ─────────────────────────────────────────────────────────────────────────────
 [Code]
 
 var
-  DeployKeyPage: TInputQueryWizardPage;
+  AgentKeyPage: TInputQueryWizardPage;
 
 procedure InitializeWizard();
 begin
-  DeployKeyPage := CreateInputQueryPage(
+  AgentKeyPage := CreateInputQueryPage(
     wpWelcome,
     'Agent Configuration',
-    'Enter your Aurigon deploy key',
-    'Your IT administrator will provide this key. It encodes everything the ' +
-    'agent needs to connect — no other configuration required.'
+    'Enter your Aurigon agent key',
+    'Find this on your dashboard under Download Agent. It is the same ' +
+    'key for every machine in your workspace — no per-machine setup required.'
   );
 
-  DeployKeyPage.Add('Deploy Key:', False);
+  AgentKeyPage.Add('Agent Key:', False);
 
-  // Pre-fill from silent install param if provided
-  DeployKeyPage.Values[0] := ExpandConstant('{param:DEPLOYKEY|}');
+  AgentKeyPage.Values[0] := ExpandConstant('{param:AGENTKEY|}');
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
-  DeployKey: String;
+  AgentKey: String;
 begin
   Result := True;
 
-  if CurPageID = DeployKeyPage.ID then begin
-    DeployKey := Trim(DeployKeyPage.Values[0]);
+  if CurPageID = AgentKeyPage.ID then begin
+    AgentKey := Trim(AgentKeyPage.Values[0]);
 
-    if DeployKey = '' then begin
-      MsgBox('Please enter your deploy key.', mbError, MB_OK);
+    if AgentKey = '' then begin
+      MsgBox('Please enter your agent key.', mbError, MB_OK);
       Result := False;
       Exit;
     end;
 
-    if Copy(DeployKey, 1, 4) <> 'AGT-' then begin
-      MsgBox('Invalid deploy key — it should start with "AGT-". Please check the key and try again.', mbError, MB_OK);
+    if Copy(AgentKey, 1, 4) <> 'AGT-' then begin
+      MsgBox('Invalid agent key — it should start with "AGT-". Please check the key and try again.', mbError, MB_OK);
       Result := False;
       Exit;
     end;
@@ -100,35 +99,30 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  DeployKey: String;
+  AgentKey: String;
   ResultCode: Integer;
 begin
   if CurStep = ssPostInstall then begin
-    DeployKey := Trim(DeployKeyPage.Values[0]);
-    if DeployKey = '' then
-      DeployKey := ExpandConstant('{param:DEPLOYKEY|}');
+    AgentKey := Trim(AgentKeyPage.Values[0]);
+    if AgentKey = '' then
+      AgentKey := ExpandConstant('{param:AGENTKEY|}');
 
-    // 1. Install the service
     Exec(ExpandConstant('{app}\nssm.exe'),
       'install {#ServiceName} "' + ExpandConstant('{app}\aurigon-agent.exe') + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // 2. Set working directory
     Exec(ExpandConstant('{app}\nssm.exe'),
       'set {#ServiceName} AppDirectory "' + ExpandConstant('{app}') + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // 3. Set restart delay
     Exec(ExpandConstant('{app}\nssm.exe'),
       'set {#ServiceName} AppRestartDelay 5000',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // 4. Write deploy key BEFORE starting
     Exec(ExpandConstant('{app}\nssm.exe'),
-      'set {#ServiceName} AppEnvironmentExtra "AURIGON_DEPLOY_KEY=' + DeployKey + '"',
+      'set {#ServiceName} AppEnvironmentExtra "AURIGON_AGENT_KEY=' + AgentKey + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // 5. Start the service
     Exec(ExpandConstant('{app}\nssm.exe'),
       'start {#ServiceName}',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);

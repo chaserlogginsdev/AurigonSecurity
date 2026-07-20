@@ -20,8 +20,13 @@ var errUnauthorized = errors.New("unauthorized")
 func initJWT() {
 	secret := os.Getenv("AURIGON_JWT_SECRET")
 	if secret == "" {
-		secret = "aurigon-dev-secret-change-in-production-32chars"
-		log.Println("WARNING: Using default JWT secret. Set AURIGON_JWT_SECRET in production.")
+		// No soft fallback — a real incident during development showed
+		// exactly why: an NSSM config command silently wiped this var,
+		// and the backend quietly kept running on a hardcoded default
+		// secret with no obvious signal anything was wrong. Failing hard
+		// here means a misconfiguration is loud and immediate instead of
+		// a silent security downgrade discovered by accident.
+		log.Fatal("AURIGON_JWT_SECRET is not set. Set it in .env or as a real environment variable before starting.")
 	}
 	if len(secret) < 32 {
 		log.Fatal("AURIGON_JWT_SECRET must be at least 32 characters.")
@@ -32,17 +37,35 @@ func initJWT() {
 // ── Rate limiting ──────────────────────────────────────────────────────────
 
 type rateLimiter struct {
-	mu       sync.Mutex
-	attempts map[string][]time.Time
+	mu          sync.Mutex
+	attempts    map[string][]time.Time
+	maxAttempts int
+	window      time.Duration
 }
 
-var loginLimiter = &rateLimiter{attempts: map[string][]time.Time{}}
+func newRateLimiter(maxAttempts int, window time.Duration) *rateLimiter {
+	return &rateLimiter{
+		attempts:    map[string][]time.Time{},
+		maxAttempts: maxAttempts,
+		window:      window,
+	}
+}
+
+var loginLimiter = newRateLimiter(5, 15*time.Minute)
+
+// agentAuthFailureLimiter throttles repeated FAILED agent-key attempts per
+// IP — not every agent request. Legitimate agents make several requests
+// per sync cycle (register, inventory, groups, sessions, actions) using a
+// valid key, and must never be slowed down. This only counts against an
+// IP when authentication actually fails, so it targets brute-force/
+// credential-guessing attempts specifically.
+var agentAuthFailureLimiter = newRateLimiter(20, 5*time.Minute)
 
 func (rl *rateLimiter) allow(key string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	now := time.Now()
-	window := now.Add(-15 * time.Minute)
+	window := now.Add(-rl.window)
 	attempts := rl.attempts[key]
 	var recent []time.Time
 	for _, t := range attempts {
@@ -51,11 +74,38 @@ func (rl *rateLimiter) allow(key string) bool {
 		}
 	}
 	rl.attempts[key] = recent
-	if len(recent) >= 5 {
+	if len(recent) >= rl.maxAttempts {
 		return false
 	}
 	rl.attempts[key] = append(rl.attempts[key], now)
 	return true
+}
+
+// tooManyRecent checks whether a key has hit the limit WITHOUT recording
+// a new attempt — used when you want to gate on failures only, not on
+// every request (legitimate agents make many successful requests per
+// cycle and must never be throttled).
+func (rl *rateLimiter) tooManyRecent(key string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	window := now.Add(-rl.window)
+	attempts := rl.attempts[key]
+	var recent []time.Time
+	for _, t := range attempts {
+		if t.After(window) {
+			recent = append(recent, t)
+		}
+	}
+	rl.attempts[key] = recent
+	return len(recent) >= rl.maxAttempts
+}
+
+// recordFailure explicitly logs a failed attempt against a key.
+func (rl *rateLimiter) recordFailure(key string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.attempts[key] = append(rl.attempts[key], time.Now())
 }
 
 // ── Login ──────────────────────────────────────────────────────────────────
@@ -116,11 +166,13 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	err = db.QueryRow(`SELECT password, role FROM users WHERE username = ?`, req.Username).
 		Scan(&hashedPassword, &role)
 	if err != nil {
+		writeAudit(db, "", "login_failed", req.Username, req.Username, clientIP(r), "unknown username")
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(req.Password)); err != nil {
+		writeAudit(db, "", "login_failed", req.Username, req.Username, clientIP(r), "wrong password")
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -141,6 +193,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("Login: %s @ %s (%s)", req.Username, tenant.Slug, tenant.ID)
+	writeAudit(db, "", "login_success", req.Username, req.Username, clientIP(r), "")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(LoginResponse{
 		Token:      tokenString,
@@ -197,6 +250,7 @@ func changePasswordHandler(w http.ResponseWriter, r *http.Request) {
 
 	db.Exec(`UPDATE users SET password = ? WHERE username = ?`, string(newHash), username)
 	log.Printf("Password changed: %s @ %s", username, tenantIDFromCtx(r))
+	writeAudit(db, "", "dashboard_password_changed", username, username, clientIP(r), "")
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -246,13 +300,56 @@ func adminOnly(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // corsMiddleware handles CORS preflight and headers.
+// allowedOrigins is computed once at startup from AURIGON_ALLOWED_ORIGINS
+// (comma-separated). If unset, falls back to local-dev-only origins —
+// this must be set explicitly for any real deployment.
+var allowedOrigins = getAllowedOrigins()
+
+func getAllowedOrigins() map[string]bool {
+	set := map[string]bool{}
+	val := os.Getenv("AURIGON_ALLOWED_ORIGINS")
+	if val == "" {
+		// Local dev defaults: the Vite dev server and the backend serving
+		// its own dashboard directly, over both http and https.
+		for _, o := range []string{
+			"http://localhost:5173",
+			"http://localhost:8080",
+			"https://localhost:8080",
+		} {
+			set[o] = true
+		}
+		return set
+	}
+	for _, o := range strings.Split(val, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			set[o] = true
+		}
+	}
+	return set
+}
+
+// corsMiddleware only allows cross-origin requests from an explicit
+// allow-list — it no longer reflects back any origin that asks.
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Standard security headers — applied to every response since
+		// every route is wrapped in this middleware.
+		w.Header().Set("X-Content-Type-Options", "nosniff")  // stop browsers guessing content type
+		w.Header().Set("X-Frame-Options", "DENY")             // block embedding in an iframe (clickjacking)
+		w.Header().Set("Referrer-Policy", "same-origin")      // don't leak URLs to other sites via referrer
+		if r.TLS != nil {
+			// Only sent over HTTPS — tells browsers to always use HTTPS for
+			// this host going forward, even if someone types http:// by hand.
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+
 		origin := r.Header.Get("Origin")
-		if origin != "" {
+		if origin != "" && allowedOrigins[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Agent-Key, X-Deploy-Key")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Agent-Key")
+			w.Header().Set("Vary", "Origin")
 		}
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusNoContent)

@@ -2,6 +2,12 @@
 *.exe
 *.log
 
+# Secrets — never commit real .env files, only .env.example
+.env
+backend/.env
+agent/.env
+*.pem
+
 # Database
 *.db
 *.db-shm

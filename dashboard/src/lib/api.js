@@ -42,8 +42,15 @@ export const api = {
   createAction: (token, machineId, type, username, params = {}) =>
     request('POST', '/actions/create', token, { machine_id: machineId, type, username, params }),
 
+  bulkCreateAction: (token, targets, type, params = {}) =>
+    request('POST', '/actions/bulk-create', token, { targets, type, params }),
+
   getActionStatus: (token, machineId) =>
     request('GET', `/actions/status?machine_id=${machineId}`, token),
+
+  // Sessions
+  getSessions: (token, machineId) =>
+    request('GET', `/sessions/list?machine_id=${machineId}`, token),
 
   // Audit
   getAuditLog: (token) => request('GET', '/audit', token),
@@ -57,14 +64,8 @@ export const api = {
   deleteUser: (token, username) =>
     request('POST', '/users/delete', token, { username }),
 
-  // Deploy keys
-  getDeployKeys: (token) => request('GET', '/deploy-keys', token),
-
-  generateDeployKey: (token, label, backendURL) =>
-    request('POST', '/deploy-keys/generate', token, { label, backend_url: backendURL }),
-
-  revokeDeployKey: (token, id) =>
-    request('POST', '/deploy-keys/revoke', token, { id }),
+  // Agent key (single, permanent per tenant)
+  getAgentKey: (token) => request('GET', '/agent-key', token),
 
   // Groups
   getGroups: (token, machineId) =>
